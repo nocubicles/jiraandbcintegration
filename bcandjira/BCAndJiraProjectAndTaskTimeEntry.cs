@@ -42,7 +42,7 @@ namespace bcandjira
             var response = req.CreateResponse(HttpStatusCode.OK);
             response.Headers.Add("Content-Type", "text/plain; charset=utf-8");
 
-            response.WriteString("Welcome to Azure Functions!");            
+            response.WriteString("Added to the queue");
 
             return new TimeEntryResponse()
             {
