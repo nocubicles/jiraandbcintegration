@@ -20,23 +20,41 @@ namespace bcandjira
         {
             var logger = executionContext.GetLogger("HttpExample");
             logger.LogInformation("C# HTTP trigger function processed a request.");
-
-            var content = await new StreamReader(req.Body).ReadToEndAsync();
-
-            JiraTask jiraTask = JiraTask.GetJiraTaskFromJson(content);
-            StringBuilder message = JiraTask.GetIssueMessage(jiraTask.Issue);
-
-            var response = req.CreateResponse(HttpStatusCode.OK);
-            response.Headers.Add("Content-Type", "text/plain; charset=utf-8");
-
-            response.WriteString("Added to the queue");
-
-            return new JobAndTaskResponse()
+            var handshakewordfromrequest = req.Query["handshakeword"];
+            
+            if (!Helpers.CheckHandkShake(handshakewordfromrequest))
             {
-                // Write a single message.
-                Messages = new string[] { message.ToString() },
-                HttpResponse = response
-            };
+                var response = req.CreateResponse(HttpStatusCode.Forbidden);
+                response.Headers.Add("Content-Type", "text/plain; charset=utf-8");
+
+                response.WriteString("Handshake failed");
+
+                return new JobAndTaskResponse()
+                {
+                    // Write a single message.
+                    Messages = new string[] { },
+                    HttpResponse = response
+                };
+            } else
+            {
+                var content = await new StreamReader(req.Body).ReadToEndAsync();
+
+                JiraTask jiraTask = JiraTask.GetJiraTaskFromJson(content);
+                StringBuilder message = JiraTask.GetIssueMessage(jiraTask.Issue);
+
+                var response = req.CreateResponse(HttpStatusCode.OK);
+                response.Headers.Add("Content-Type", "text/plain; charset=utf-8");
+
+                response.WriteString("Added to the queue");
+
+                return new JobAndTaskResponse()
+                {
+                    // Write a single message.
+                    Messages = new string[] { message.ToString() },
+                    HttpResponse = response
+                };
+            }
+            
         }
 
     }
@@ -47,4 +65,5 @@ namespace bcandjira
         public string[] Messages { get; set; }
         public HttpResponseData HttpResponse { get; set; }
     }
+
 }

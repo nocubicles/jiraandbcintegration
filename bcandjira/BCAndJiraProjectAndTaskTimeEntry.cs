@@ -21,23 +21,41 @@ namespace bcandjira
         {
             var logger = executionContext.GetLogger("HttpExample");
             logger.LogInformation("C# HTTP trigger function processed a request.");
+            var handshakewordfromrequest = req.Query["handshakeword"];
 
-            var content = await new StreamReader(req.Body).ReadToEndAsync();
-
-            WorkLog workLog = WorkLog.FromJson(content);
-            StringBuilder message = WorkLog.GetWorkLogMessage(workLog.Worklog);
-
-            var response = req.CreateResponse(HttpStatusCode.OK);
-            response.Headers.Add("Content-Type", "text/plain; charset=utf-8");
-
-            response.WriteString("Added to the queue");
-
-            return new TimeEntryResponse()
+            if (!Helpers.CheckHandkShake(handshakewordfromrequest))
             {
-                // Write a single message.
-                Messages = new string[] { message.ToString() },
-                HttpResponse = response
-            };
+                var response = req.CreateResponse(HttpStatusCode.Forbidden);
+                response.Headers.Add("Content-Type", "text/plain; charset=utf-8");
+
+                response.WriteString("Handshake failed");
+
+                return new TimeEntryResponse()
+                {
+                    // Write a single message.
+                    Messages = new string[] { },
+                    HttpResponse = response
+                };
+            }
+            else
+            {
+                var content = await new StreamReader(req.Body).ReadToEndAsync();
+
+                WorkLog workLog = WorkLog.FromJson(content);
+                StringBuilder message = WorkLog.GetWorkLogMessage(workLog.Worklog);
+
+                var response = req.CreateResponse(HttpStatusCode.OK);
+                response.Headers.Add("Content-Type", "text/plain; charset=utf-8");
+
+                response.WriteString("Added to the queue");
+
+                return new TimeEntryResponse()
+                {
+                    // Write a single message.
+                    Messages = new string[] { message.ToString() },
+                    HttpResponse = response
+                };
+            }                
         }
     }
 
