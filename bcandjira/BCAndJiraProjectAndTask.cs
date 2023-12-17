@@ -23,22 +23,13 @@ namespace bcandjira
 
             var content = await new StreamReader(req.Body).ReadToEndAsync();
 
-            JiraTask jiraTask = JiraTask.FromJson(content);
-            StringBuilder message = new StringBuilder();
-            message.Append(jiraTask.Issue.Fields.Project.Key);
-            message.Append(';');
-            message.Append(jiraTask.Issue.Fields.Project.Name);
-            message.Append(";");
-            message.Append(jiraTask.Issue.Key);
-            message.Append(";");
-            message.Append(jiraTask.Issue.Fields.Summary);
-            message.Append(";");
-            message.Append(jiraTask.Issue.Id);
+            JiraTask jiraTask = JiraTask.GetJiraTaskFromJson(content);
+            StringBuilder message = JiraTask.GetIssueMessage(jiraTask.Issue);
 
             var response = req.CreateResponse(HttpStatusCode.OK);
             response.Headers.Add("Content-Type", "text/plain; charset=utf-8");
 
-            response.WriteString("Added to the queue");            
+            response.WriteString("Added to the queue");
 
             return new JobAndTaskResponse()
             {
@@ -47,6 +38,7 @@ namespace bcandjira
                 HttpResponse = response
             };
         }
+
     }
 
     public class JobAndTaskResponse

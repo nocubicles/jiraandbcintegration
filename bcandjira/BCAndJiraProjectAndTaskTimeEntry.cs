@@ -25,19 +25,7 @@ namespace bcandjira
             var content = await new StreamReader(req.Body).ReadToEndAsync();
 
             WorkLog workLog = WorkLog.FromJson(content);
-            StringBuilder message = new StringBuilder();
-
-            message.Append(workLog.Worklog.Id);
-            message.Append(";");
-            message.Append(workLog.Worklog.IssueId);
-            message.Append(";");
-            message.Append(workLog.Worklog.Author.DisplayName);
-            message.Append(";");
-            message.Append(workLog.Worklog.Started);
-            message.Append(";");
-            message.Append(workLog.Worklog.TimeSpentSeconds);
-            message.Append(";");
-            message.Append(workLog.Worklog.Comment);
+            StringBuilder message = WorkLog.GetWorkLogMessage(workLog.Worklog);
 
             var response = req.CreateResponse(HttpStatusCode.OK);
             response.Headers.Add("Content-Type", "text/plain; charset=utf-8");

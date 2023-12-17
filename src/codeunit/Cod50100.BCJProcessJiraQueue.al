@@ -2,15 +2,37 @@ codeunit 50100 "BCJ Process Jira Queue"
 {
     trigger OnRun()
     begin
+        SyncIssuesAndTimeEntries();
+    end;
+
+    procedure SyncIssuesAndTimeEntries()
+    var
+        Progress: Dialog;
+        ProgessMessage: Label 'Syncing......';
+    begin
+        if GuiAllowed then
+            Progress.Open(ProgessMessage);
         ProcessMessagesFromQueue('syncprojectandtask');
         ProcessMessagesFromQueue('syncprojecttimeentries');
-        Message('Sync Done');
+        Progress.Close();
+        if GuiAllowed then
+            Message('Sync Done');
     end;
 
     procedure ProcessMessagesFromQueue(Queue: Text)
     begin
         if Process(Queue) then begin
             ProcessMessagesFromQueue(Queue);
+        end;
+    end;
+
+    procedure DoFullSyncAllIssuesAndWorkEntries(Queue: Text)
+    var
+        AzureStorageQueueSdk: Codeunit AzureStorageQueuesSdk;
+        Base64Convert: Codeunit "Base64 Convert";
+    begin
+        if AzureStorageQueueSdk.PostMessageToQueue(Queue, Base64Convert.ToBase64('yesplease')) then begin
+            Message('Full Sync Scheduled');
         end;
     end;
 
@@ -63,21 +85,34 @@ codeunit 50100 "BCJ Process Jira Queue"
     begin
         JobTask.SetRange("BCJ Jira Task Id", JiraIssueId);
         if JobTask.FindFirst() then begin
-            ProjectTimeEntry.Init();
-            ProjectTimeEntry.Validate("Project No.", JobTask."Job No.");
-            ProjectTimeEntry.Validate("Project Task No.", JobTask."Job Task No.");
-            ProjectTimeEntry.Validate("Jira ID", TimeEntryId);
-            ProjectTimeEntry.Validate("Jira Issue Id", JiraIssueId);
-            if Evaluate(PostingDateTime, PostingDate) then begin
-                PostingDateDate := DT2Date(PostingDateTime);
-                ProjectTimeEntry.Validate("Posting Date", PostingDateDate);
+            if ProjectTimeEntry.Get(TimeEntryId, JiraIssueId) then begin
+                if Evaluate(PostingDateTime, PostingDate) then begin
+                    PostingDateDate := DT2Date(PostingDateTime);
+                    ProjectTimeEntry.Validate("Posting Date", PostingDateDate);
+                end;
+                if Evaluate(TimeSpentSecondsInt, TimeSpentSeconds) then
+                    ProjectTimeEntry.Validate("Time Spend Seconds", TimeSpentSecondsInt);
+                ProjectTimeEntry.Validate("Time Spent in Hours", TimeSpentSecondsInt / 3600);
+                ProjectTimeEntry.Validate("BC Resource No.", SyncAndGetResourceCode(ResourceName));
+                ProjectTimeEntry.Validate(Comment, Comment);
+                exit(ProjectTimeEntry.Modify(true));
+            end else begin
+                ProjectTimeEntry.Init();
+                ProjectTimeEntry.Validate("Project No.", JobTask."Job No.");
+                ProjectTimeEntry.Validate("Project Task No.", JobTask."Job Task No.");
+                ProjectTimeEntry.Validate("Jira ID", TimeEntryId);
+                ProjectTimeEntry.Validate("Jira Issue Id", JiraIssueId);
+                if Evaluate(PostingDateTime, PostingDate) then begin
+                    PostingDateDate := DT2Date(PostingDateTime);
+                    ProjectTimeEntry.Validate("Posting Date", PostingDateDate);
+                end;
+                if Evaluate(TimeSpentSecondsInt, TimeSpentSeconds) then
+                    ProjectTimeEntry.Validate("Time Spend Seconds", TimeSpentSecondsInt);
+                ProjectTimeEntry.Validate("Time Spent in Hours", TimeSpentSecondsInt / 3600);
+                ProjectTimeEntry.Validate("BC Resource No.", SyncAndGetResourceCode(ResourceName));
+                ProjectTimeEntry.Validate(Comment, Comment);
+                exit(ProjectTimeEntry.Insert(true));
             end;
-            if Evaluate(TimeSpentSecondsInt, TimeSpentSeconds) then
-                ProjectTimeEntry.Validate("Time Spend Seconds", TimeSpentSecondsInt);
-            ProjectTimeEntry.Validate("Time Spent in Hours", TimeSpentSecondsInt / 3600);
-            ProjectTimeEntry.Validate("BC Resource No.", SyncAndGetResourceCode(ResourceName));
-            ProjectTimeEntry.Validate(Comment, Comment);
-            exit(ProjectTimeEntry.Insert(true));
         end;
     end;
 

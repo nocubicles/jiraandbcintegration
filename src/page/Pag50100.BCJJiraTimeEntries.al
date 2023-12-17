@@ -11,11 +11,6 @@ page 50100 "BCJ Jira Time Entries"
         {
             repeater(GroupName)
             {
-
-                field("Entry No"; Rec."Entry No")
-                {
-                    ToolTip = 'Specifies the value of the Entry No. field.';
-                }
                 field("Jira ID"; Rec."Jira ID")
                 {
                     ToolTip = 'Specifies the value of the Jira ID field.';

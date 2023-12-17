@@ -9,6 +9,7 @@
 #pragma warning disable CS8618
 #pragma warning disable CS8601
 #pragma warning disable CS8603
+using JiraIssue;
 
 namespace JiraWorkLog
 {
@@ -18,6 +19,8 @@ namespace JiraWorkLog
     using System.Text.Json;
     using System.Text.Json.Serialization;
     using System.Globalization;
+    using System.Text;
+    using TimeLogComplexComment;
 
     public partial class WorkLog
     {
@@ -66,7 +69,7 @@ namespace JiraWorkLog
         public long IssueId { get; set; }
 
         [JsonPropertyName("comment")]
-        public string Comment { get; set; }
+        public object Comment { get; set; }
     }
 
     public partial class Author
@@ -111,6 +114,43 @@ namespace JiraWorkLog
     public partial class WorkLog
     {
         public static WorkLog FromJson(string json) => JsonSerializer.Deserialize<WorkLog>(json, JiraWorkLog.Converter.Settings);
+        public static StringBuilder GetWorkLogMessage(Worklog workLog)
+        {
+            StringBuilder message = new StringBuilder();
+
+            message.Append(workLog.Id);
+            message.Append(";");
+            message.Append(workLog.IssueId);
+            message.Append(";");
+            message.Append(workLog.Author.DisplayName);
+            message.Append(";");
+            message.Append(workLog.Started);
+            message.Append(";");
+            message.Append(workLog.TimeSpentSeconds);
+            message.Append(";");
+
+            //This below is here because Jira sends comment differently. On webhook its a string but in API request its a object.
+            if (workLog.Comment != null)
+            {
+                JsonElement element = (JsonElement)workLog.Comment;
+                switch (element.ValueKind)
+                {
+                    case JsonValueKind.String:
+                        message.Append(workLog.Comment);
+                        break;
+                    case JsonValueKind.Object:
+                        ComplexComment complexComment = ComplexComment.FromJson(workLog.Comment.ToString());
+                        message.Append(complexComment.Content[0].Content[0].Text);
+                        break;
+                }
+            } 
+            else
+            {
+                message.Append("");
+            }
+ 
+            return message;
+        }        
     }
 
     public static class Serialize

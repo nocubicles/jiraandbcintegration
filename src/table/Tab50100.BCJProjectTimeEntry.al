@@ -4,13 +4,7 @@ table 50100 "BCJ Project Time Entry"
 
     fields
     {
-        field(1; "Entry No"; Integer)
-        {
-            DataClassification = ToBeClassified;
-            Caption = 'Entry No.';
-            AutoIncrement = true;
-        }
-        field(2; "Jira ID"; Text[50])
+        field(1; "Jira ID"; Text[50])
         {
             DataClassification = ToBeClassified;
             Caption = 'Jira ID';
@@ -54,7 +48,7 @@ table 50100 "BCJ Project Time Entry"
 
     keys
     {
-        key(Key1; "Entry No")
+        key(Key1; "Jira ID", "Jira Issue Id")
         {
             Clustered = true;
         }

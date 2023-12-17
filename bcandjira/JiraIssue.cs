@@ -10,6 +10,8 @@
 #pragma warning disable CS8601
 #pragma warning disable CS8603
 
+using Microsoft.Extensions.Configuration;
+
 namespace JiraIssue
 {
     using System;
@@ -18,6 +20,31 @@ namespace JiraIssue
     using System.Text.Json;
     using System.Text.Json.Serialization;
     using System.Globalization;
+    using System.Text;
+    using JiraWorkLog;
+
+    public partial class AllJiraIssuesFromSearch
+    {
+        [JsonPropertyName("startAt")]
+        public long StartAt { get; set; } = 0;
+        [JsonPropertyName("maxResults")]
+        public long MaxResults { get; set; } = 50;
+        [JsonPropertyName("total")]
+        public long Total { get; set; }
+        [JsonPropertyName("issues")]
+        public List<Issue> Issues { get; set; }
+    }
+    public partial class JiraIssuesWorklog
+    {
+        [JsonPropertyName("startAt")]
+        public long StartAt { get; set; } = 0;
+        [JsonPropertyName("maxResults")]
+        public long MaxResults { get; set; } = 50;
+        [JsonPropertyName("total")]
+        public long Total { get; set; }
+        [JsonPropertyName("worklogs")]
+        public List<Worklog> Worklogs { get; set; }
+    }
 
     public partial class JiraTask
     {
@@ -532,7 +559,142 @@ namespace JiraIssue
 
     public partial class JiraTask
     {
-        public static JiraTask FromJson(string json) => JsonSerializer.Deserialize<JiraTask>(json, JiraIssue.Converter.Settings);
+  
+        public static JiraTask GetJiraTaskFromJson(string json) => JsonSerializer.Deserialize<JiraTask>(json, JiraIssue.Converter.Settings);
+
+        public static AllJiraIssuesFromSearch GetAllJiraTasksFromJson(string json) => JsonSerializer.Deserialize<AllJiraIssuesFromSearch>(json, JiraIssue.Converter.Settings);
+
+        public static JiraIssuesWorklog GetAllJiraIssueWorklogsFromJson(string json) => JsonSerializer.Deserialize<JiraIssuesWorklog>(json, JiraIssue.Converter.Settings);
+
+        public static StringBuilder GetIssueMessage(Issue issue)
+        {
+
+            StringBuilder message = new StringBuilder();
+            message.Append(issue.Fields.Project.Key);
+            message.Append(";");
+            message.Append(issue.Fields.Project.Name);
+            message.Append(";");
+            message.Append(issue.Key);
+            message.Append(";");
+            message.Append(issue.Fields.Summary);
+            message.Append(";");
+            message.Append(issue.Id);
+            return message;
+        }
+
+        public static async IAsyncEnumerable<Issue> GetAllIssuesAsync(int StartAt)
+        {
+
+            var jiraClient = GetJiraClient();
+            var maxResultsQuery = 50;
+            string Query = GetIssuesQuery(StartAt, maxResultsQuery);
+            List<Issue> AllIssues = new List<Issue>();
+
+            HttpResponseMessage responseMessage = await jiraClient.GetAsync(Query);
+            if (responseMessage.IsSuccessStatusCode)
+            {
+                AllJiraIssuesFromSearch allJiraTasksFromSearch = GetAllJiraTasksFromJson(await responseMessage.Content.ReadAsStringAsync());
+                var TotalTasks = allJiraTasksFromSearch.Total;
+                decimal TotalRequestsRequired = (decimal)TotalTasks / (decimal)maxResultsQuery;
+                TotalRequestsRequired = Math.Ceiling(TotalRequestsRequired);
+                for (int i = 0; i < TotalRequestsRequired; i++)
+                {
+                   
+                    var issues = await GetAllJiraIssues(StartAt, maxResultsQuery);
+
+                    foreach (Issue issue in issues)
+                    {
+                        yield return issue;
+                    }
+                    StartAt += maxResultsQuery;
+                }
+            }
+        }
+        public static async IAsyncEnumerable<Worklog> GetIssueWorkLog(int StartAt, string IssueId)
+        {
+            var jiraClient = GetJiraClient();
+            var maxResultsQuery = 50;
+            string Query = GetIssuesWorklogQuery(StartAt, maxResultsQuery, IssueId);
+            List<Worklog> WorkLogs= new List<Worklog>();
+
+            HttpResponseMessage responseMessage = await jiraClient.GetAsync(Query);
+            if (responseMessage.IsSuccessStatusCode)
+            {
+                JiraIssuesWorklog jiraIssuesWorklog = GetAllJiraIssueWorklogsFromJson(await responseMessage.Content.ReadAsStringAsync());
+                var TotalTasks = jiraIssuesWorklog.Total;
+                decimal TotalRequestsRequired = (decimal)TotalTasks / (decimal)maxResultsQuery;
+                TotalRequestsRequired = Math.Ceiling(TotalRequestsRequired);
+                for (int i = 0; i < TotalRequestsRequired; i++)
+                {
+
+                    var workslogs = await GetAllJiraIssueWorkLogs(StartAt, maxResultsQuery,IssueId);
+
+                    foreach (Worklog worklog in workslogs)
+                    {
+                        yield return worklog;
+                    }
+                    StartAt += maxResultsQuery;
+                }
+            }
+        }
+
+        public static async Task<List<Worklog>> GetAllJiraIssueWorkLogs(int StartAt, int maxResultsQuery,string IssueId)
+        {
+            var jiraClient = GetJiraClient();
+            string Query = GetIssuesWorklogQuery(StartAt, maxResultsQuery, IssueId);
+            List<Worklog> WorkLogs = new List<Worklog>();
+
+            HttpResponseMessage responseMessage = await jiraClient.GetAsync(Query);
+            if (responseMessage.IsSuccessStatusCode)
+            {
+                JiraIssuesWorklog jiraIssuesWorklog = GetAllJiraIssueWorklogsFromJson(await responseMessage.Content.ReadAsStringAsync());
+                WorkLogs = jiraIssuesWorklog.Worklogs;
+                return WorkLogs;
+
+            }
+            return WorkLogs;
+        }
+
+        public static async Task<List<Issue>> GetAllJiraIssues(int StartAt,int maxResultsQuery)
+        {
+            var jiraClient = GetJiraClient();
+            string IssueQuery = GetIssuesQuery(StartAt, maxResultsQuery);
+            List<Issue> AllIssues = new List<Issue>();
+
+            HttpResponseMessage responseMessage = await jiraClient.GetAsync(IssueQuery);
+            if (responseMessage.IsSuccessStatusCode)
+            {
+                AllJiraIssuesFromSearch allJiraTasksFromSearch = GetAllJiraTasksFromJson(await responseMessage.Content.ReadAsStringAsync());
+                AllIssues = allJiraTasksFromSearch.Issues;
+                return AllIssues;
+
+            }
+            return AllIssues;
+        }
+        static string GetIssuesWorklogQuery(int startAt, int maxResultsQuery,string issueId)
+        {
+            return $"/rest/api/3/issue/{issueId}/worklog?startAt={startAt}&maxResults={maxResultsQuery}";
+        }
+        static string GetIssuesQuery(int startAt, int maxResultsQuery)
+        {
+            return $"rest/api/3/search?startAt={startAt}&maxResults={maxResultsQuery}";
+        }
+        public static HttpClient GetJiraClient()
+        {
+            string JiraEndPoint = Environment.GetEnvironmentVariable("JiraEndPoint");
+            string JiraUser = Environment.GetEnvironmentVariable("JiraUser");
+            string JiraAPIKey = Environment.GetEnvironmentVariable("JiraAPIKey");
+            var authenticationString = $"{JiraUser}:{JiraAPIKey}";
+            var base64EncodedAuthenticationString = Convert.ToBase64String(System.Text.ASCIIEncoding.UTF8.GetBytes(authenticationString));
+
+            HttpClient httpClient = new()
+            {
+                BaseAddress = new Uri(JiraEndPoint),
+            };
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", base64EncodedAuthenticationString);
+
+            return httpClient;
+        }
     }
 
     public static class Serialize
@@ -685,7 +847,11 @@ namespace JiraIssue
 
 
         public static readonly IsoDateTimeOffsetConverter Singleton = new IsoDateTimeOffsetConverter();
+
+    
+
     }
+
 }
 #pragma warning restore CS8618
 #pragma warning restore CS8601
