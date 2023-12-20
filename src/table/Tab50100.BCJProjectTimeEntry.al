@@ -44,6 +44,10 @@ table 50100 "BCJ Project Time Entry"
         {
             Caption = 'Comment';
         }
+        field(11; "Is Posted"; Boolean)
+        {
+            Caption = 'Is posted to project cost';
+        }
     }
 
     keys

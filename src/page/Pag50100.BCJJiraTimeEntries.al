@@ -43,21 +43,33 @@ page 50100 "BCJ Jira Time Entries"
                 {
 
                 }
+                field("Is Posted"; Rec."Is Posted")
+                {
+
+                }
             }
         }
     }
 
     actions
     {
+        area(Promoted)
+        {
+            actionref(CreateJournal; CreateJournalEntries)
+            { }
+        }
         area(Processing)
         {
-            action(ActionName)
+            action(CreateJournalEntries)
             {
                 ApplicationArea = All;
-
+                Caption = 'Create Project Journal Entries';
+                Image = Journals;
                 trigger OnAction()
+                var
+                    PostJiraTimeToJob: Codeunit "BCJ Post Jira Time To Job";
                 begin
-
+                    PostJiraTimeToJob.ProcessUnpostedJiraTimeEntries();
                 end;
             }
         }
