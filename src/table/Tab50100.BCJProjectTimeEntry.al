@@ -44,9 +44,13 @@ table 50100 "BCJ Project Time Entry"
         {
             Caption = 'Comment';
         }
-        field(11; "Is Posted"; Boolean)
+        field(11; "Transfer To Job Journal"; Boolean)
         {
-            Caption = 'Is posted to project cost';
+            Caption = 'Is transfered to Job Journal';
+        }
+        field(12; "Skip transfer to Job Journal"; Boolean)
+        {
+            Caption = 'Skip this line from transferring to job journals';
         }
     }
 

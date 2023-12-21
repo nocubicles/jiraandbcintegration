@@ -43,7 +43,11 @@ page 50100 "BCJ Jira Time Entries"
                 {
 
                 }
-                field("Is Posted"; Rec."Is Posted")
+                field("Is Posted"; Rec."Transfer To Job Journal")
+                {
+
+                }
+                field("Skip transfer to Job Journal"; Rec."Skip transfer to Job Journal")
                 {
 
                 }
