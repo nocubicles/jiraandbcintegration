@@ -65,7 +65,11 @@ codeunit 50101 "BCJ Post Jira Time To Job"
 
     [EventSubscriber(ObjectType::Codeunit, Codeunit::"Job Create-Invoice", 'OnBeforeInsertSalesLine', '', false, false)]
     local procedure ChangeSalesLineDescription(JobPlanningLine: Record "Job Planning Line"; var SalesLine: Record "Sales Line")
+    var
+        JobTask: Record "Job Task";
     begin
-        //todo use Jira issue description for sales line description here
+        JobTask.SetLoadFields(Description);
+        if JobTask.Get(JobPlanningLine."Job No.", JobPlanningLine."Job Task No.") then
+            SalesLine.Validate(Description, JobTask.Description);
     end;
 }
