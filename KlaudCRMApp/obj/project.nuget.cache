@@ -1,0 +1,36 @@
+{
+  "version": 2,
+  "dgSpecHash": "z3rNwZq4B0s8vpIKKp5z2EfD490kIM5x2X267H2TK23QZDrvx8Czj7HuikhNw5Fi3nYNpS7ck7AdOWYxHtyuFA==",
+  "success": true,
+  "projectFilePath": "C:\\Users\\VillemHeinsalu\\businesscentralprojects\\klaud\\bcjiraintegration\\KlaudCRMApp\\KlaudCRMApp.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\VillemHeinsalu\\.nuget\\packages\\microsoft.bcl.asyncinterfaces\\5.0.0\\microsoft.bcl.asyncinterfaces.5.0.0.nupkg.sha512",
+    "C:\\Users\\VillemHeinsalu\\.nuget\\packages\\microsoft.crmsdk.coreassemblies\\9.0.2.51\\microsoft.crmsdk.coreassemblies.9.0.2.51.nupkg.sha512",
+    "C:\\Users\\VillemHeinsalu\\.nuget\\packages\\microsoft.crmsdk.xrmtooling.pluginregistrationtool\\9.1.0.187\\microsoft.crmsdk.xrmtooling.pluginregistrationtool.9.1.0.187.nupkg.sha512",
+    "C:\\Users\\VillemHeinsalu\\.nuget\\packages\\microsoft.extensions.objectpool\\6.0.16\\microsoft.extensions.objectpool.6.0.16.nupkg.sha512",
+    "C:\\Users\\VillemHeinsalu\\.nuget\\packages\\system.formats.asn1\\6.0.0\\system.formats.asn1.6.0.0.nupkg.sha512",
+    "C:\\Users\\VillemHeinsalu\\.nuget\\packages\\system.numerics.vectors\\4.5.0\\system.numerics.vectors.4.5.0.nupkg.sha512",
+    "C:\\Users\\VillemHeinsalu\\.nuget\\packages\\system.private.servicemodel\\4.10.3\\system.private.servicemodel.4.10.3.nupkg.sha512",
+    "C:\\Users\\VillemHeinsalu\\.nuget\\packages\\system.reflection.dispatchproxy\\4.7.1\\system.reflection.dispatchproxy.4.7.1.nupkg.sha512",
+    "C:\\Users\\VillemHeinsalu\\.nuget\\packages\\system.runtime.compilerservices.unsafe\\6.0.0\\system.runtime.compilerservices.unsafe.6.0.0.nupkg.sha512",
+    "C:\\Users\\VillemHeinsalu\\.nuget\\packages\\system.security.accesscontrol\\6.0.0\\system.security.accesscontrol.6.0.0.nupkg.sha512",
+    "C:\\Users\\VillemHeinsalu\\.nuget\\packages\\system.security.cryptography.pkcs\\6.0.1\\system.security.cryptography.pkcs.6.0.1.nupkg.sha512",
+    "C:\\Users\\VillemHeinsalu\\.nuget\\packages\\system.security.cryptography.xml\\6.0.1\\system.security.cryptography.xml.6.0.1.nupkg.sha512",
+    "C:\\Users\\VillemHeinsalu\\.nuget\\packages\\system.security.principal.windows\\5.0.0\\system.security.principal.windows.5.0.0.nupkg.sha512",
+    "C:\\Users\\VillemHeinsalu\\.nuget\\packages\\system.servicemodel.primitives\\8.0.0\\system.servicemodel.primitives.8.0.0.nupkg.sha512",
+    "C:\\Users\\VillemHeinsalu\\.nuget\\packages\\system.text.encodings.web\\6.0.0\\system.text.encodings.web.6.0.0.nupkg.sha512",
+    "C:\\Users\\VillemHeinsalu\\.nuget\\packages\\system.text.json\\6.0.7\\system.text.json.6.0.7.nupkg.sha512"
+  ],
+  "logs": [
+    {
+      "code": "NU1701",
+      "level": "Warning",
+      "warningLevel": 1,
+      "message": "Package 'Microsoft.CrmSdk.CoreAssemblies 9.0.2.51' was restored using '.NETFramework,Version=v4.6.1, .NETFramework,Version=v4.6.2, .NETFramework,Version=v4.7, .NETFramework,Version=v4.7.1, .NETFramework,Version=v4.7.2, .NETFramework,Version=v4.8, .NETFramework,Version=v4.8.1' instead of the project target framework 'net8.0'. This package may not be fully compatible with your project.",
+      "libraryId": "Microsoft.CrmSdk.CoreAssemblies",
+      "targetGraphs": [
+        "net8.0"
+      ]
+    }
+  ]
+}

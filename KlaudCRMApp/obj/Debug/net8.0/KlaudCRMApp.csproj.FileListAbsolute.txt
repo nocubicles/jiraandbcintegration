@@ -1,0 +1,13 @@
+C:\Users\VillemHeinsalu\businesscentralprojects\klaud\bcjiraintegration\KlaudCRMApp\obj\Debug\net8.0\KlaudCRMApp.csproj.AssemblyReference.cache
+C:\Users\VillemHeinsalu\businesscentralprojects\klaud\bcjiraintegration\KlaudCRMApp\obj\Debug\net8.0\KlaudCRMApp.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\VillemHeinsalu\businesscentralprojects\klaud\bcjiraintegration\KlaudCRMApp\obj\Debug\net8.0\KlaudCRMApp.AssemblyInfoInputs.cache
+C:\Users\VillemHeinsalu\businesscentralprojects\klaud\bcjiraintegration\KlaudCRMApp\obj\Debug\net8.0\KlaudCRMApp.AssemblyInfo.cs
+C:\Users\VillemHeinsalu\businesscentralprojects\klaud\bcjiraintegration\KlaudCRMApp\obj\Debug\net8.0\KlaudCRMApp.csproj.CoreCompileInputs.cache
+C:\Users\VillemHeinsalu\businesscentralprojects\klaud\bcjiraintegration\KlaudCRMApp\obj\Debug\net8.0\KlaudCRMApp.sourcelink.json
+C:\Users\VillemHeinsalu\businesscentralprojects\klaud\bcjiraintegration\KlaudCRMApp\bin\Debug\net8.0\KlaudCRMApp.deps.json
+C:\Users\VillemHeinsalu\businesscentralprojects\klaud\bcjiraintegration\KlaudCRMApp\bin\Debug\net8.0\KlaudCRMApp.dll
+C:\Users\VillemHeinsalu\businesscentralprojects\klaud\bcjiraintegration\KlaudCRMApp\bin\Debug\net8.0\KlaudCRMApp.pdb
+C:\Users\VillemHeinsalu\businesscentralprojects\klaud\bcjiraintegration\KlaudCRMApp\obj\Debug\net8.0\KlaudCRMApp.dll
+C:\Users\VillemHeinsalu\businesscentralprojects\klaud\bcjiraintegration\KlaudCRMApp\obj\Debug\net8.0\refint\KlaudCRMApp.dll
+C:\Users\VillemHeinsalu\businesscentralprojects\klaud\bcjiraintegration\KlaudCRMApp\obj\Debug\net8.0\KlaudCRMApp.pdb
+C:\Users\VillemHeinsalu\businesscentralprojects\klaud\bcjiraintegration\KlaudCRMApp\obj\Debug\net8.0\ref\KlaudCRMApp.dll

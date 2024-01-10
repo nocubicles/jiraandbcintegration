@@ -1,0 +1,81 @@
+{
+  "format": 1,
+  "restore": {
+    "C:\\Users\\VillemHeinsalu\\businesscentralprojects\\klaud\\bcjiraintegration\\KlaudCRMApp\\KlaudCRMApp.csproj": {}
+  },
+  "projects": {
+    "C:\\Users\\VillemHeinsalu\\businesscentralprojects\\klaud\\bcjiraintegration\\KlaudCRMApp\\KlaudCRMApp.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "C:\\Users\\VillemHeinsalu\\businesscentralprojects\\klaud\\bcjiraintegration\\KlaudCRMApp\\KlaudCRMApp.csproj",
+        "projectName": "KlaudCRMApp",
+        "projectPath": "C:\\Users\\VillemHeinsalu\\businesscentralprojects\\klaud\\bcjiraintegration\\KlaudCRMApp\\KlaudCRMApp.csproj",
+        "packagesPath": "C:\\Users\\VillemHeinsalu\\.nuget\\packages\\",
+        "outputPath": "C:\\Users\\VillemHeinsalu\\businesscentralprojects\\klaud\\bcjiraintegration\\KlaudCRMApp\\obj\\",
+        "projectStyle": "PackageReference",
+        "configFilePaths": [
+          "C:\\Users\\VillemHeinsalu\\AppData\\Roaming\\NuGet\\NuGet.Config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
+        ],
+        "originalTargetFrameworks": [
+          "net8.0"
+        ],
+        "sources": {
+          "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net8.0": {
+            "targetAlias": "net8.0",
+            "projectReferences": {}
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        }
+      },
+      "frameworks": {
+        "net8.0": {
+          "targetAlias": "net8.0",
+          "dependencies": {
+            "Microsoft.CrmSdk.CoreAssemblies": {
+              "target": "Package",
+              "version": "[9.0.2.51, )"
+            },
+            "Microsoft.CrmSdk.XrmTooling.PluginRegistrationTool": {
+              "target": "Package",
+              "version": "[9.1.0.187, )"
+            },
+            "System.Private.ServiceModel": {
+              "target": "Package",
+              "version": "[4.10.3, )"
+            },
+            "System.ServiceModel.Primitives": {
+              "target": "Package",
+              "version": "[8.0.0, )"
+            }
+          },
+          "imports": [
+            "net461",
+            "net462",
+            "net47",
+            "net471",
+            "net472",
+            "net48",
+            "net481"
+          ],
+          "assetTargetFallback": true,
+          "warn": true,
+          "frameworkReferences": {
+            "Microsoft.NETCore.App": {
+              "privateAssets": "all"
+            }
+          },
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\8.0.100/PortableRuntimeIdentifierGraph.json"
+        }
+      }
+    }
+  }
+}

@@ -24,7 +24,7 @@
             "type": "al",
             "environmentType": "Sandbox",
             "environmentName": "sandbox",
-            "tenant":"CRMbc297649.onmicrosoft.com",
+            "tenant":"klaudee.onmicrosoft.com",
             "startupObjectId": 89,
             "startupObjectType": "Page",
             "breakOnError": "All",
