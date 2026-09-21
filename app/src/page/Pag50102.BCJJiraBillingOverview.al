@@ -89,7 +89,7 @@ page 50102 "BCJ Jira Billing Overview"
                 field(ShowTimeEntriesCtrl; ShowTimeEntries)
                 {
                     Caption = 'Show Time Entries';
-                    ToolTip = 'Specifies whether individual Jira time entries are shown under each task.';
+                    ToolTip = 'Specifies whether individual Jira time entries are shown under each task. Turn off for a faster overview over long periods.';
 
                     trigger OnValidate()
                     begin
@@ -321,6 +321,7 @@ page 50102 "BCJ Jira Billing Overview"
         // Picks up entries marked on the legacy Jira Time Entries page; skipped for read-only users.
         if TimeEntry.WritePermission() then
             BillingMgt.SyncStatusFromLegacyFlags();
+        ShowTimeEntries := true;
         RefreshOverview();
     end;
 
