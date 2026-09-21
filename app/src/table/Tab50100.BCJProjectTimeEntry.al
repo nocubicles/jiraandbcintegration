@@ -90,12 +90,37 @@ table 50100 "BCJ Project Time Entry"
             FieldClass = FlowField;
             CalcFormula = lookup("Job Task"."BCJ Jira Status" where("Job No."=field("Project No."), "Job Task No."=field("Project Task No.")));
         }
+        field(18; "Billing Status"; Enum "BCJ Billing Status")
+        {
+            Caption = 'Billing Status';
+            DataClassification = CustomerContent;
+
+            trigger OnValidate()
+            begin
+                // Keep the legacy flags in sync for the Jira Time Entries page.
+                "Is Billable" := "Billing Status" in ["Billing Status"::Billable, "Billing Status"::Billed];
+                "Is Billed" := "Billing Status" = "Billing Status"::Billed;
+            end;
+        }
+        field(19; "Bill-to Customer No."; Code[20])
+        {
+            Caption = 'Bill-to Customer No.';
+            Editable = false;
+            FieldClass = FlowField;
+            CalcFormula = lookup(Job."Bill-to Customer No." where("No."=field("Project No.")));
+        }
     }
     keys
     {
         key(Key1; "Jira ID", "Jira Issue Id")
         {
             Clustered = true;
+        }
+        key(ProjectTaskDate; "Project No.", "Project Task No.", "Posting Date")
+        {
+        }
+        key(BillingStatus; "Billing Status", "Posting Date")
+        {
         }
     }
 }
