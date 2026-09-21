@@ -7,11 +7,16 @@ pageextension 50101 "BCJ JobS Setup" extends "Jobs Setup"
             group("BCJ JiraIntegration")
             {
                 Caption = 'Jira Integration';
+
                 field("BCJ Job Journal Templ."; Rec."BCJ Job Journal Templ.")
                 {
                     ApplicationArea = All;
                 }
                 field("BCJ Job Journal Batch"; Rec."BCJ Job Journal Batch")
+                {
+                    ApplicationArea = All;
+                }
+                field("BCJ Default Job Posting Group"; Rec."Default Job Posting Group")
                 {
                     ApplicationArea = All;
                 }
