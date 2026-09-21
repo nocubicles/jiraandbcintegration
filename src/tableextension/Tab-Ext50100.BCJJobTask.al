@@ -7,10 +7,15 @@ tableextension 50100 "BCJ Job Task" extends "Job Task"
             Caption = 'Jira Issue Id';
             DataClassification = CustomerContent;
         }
+        field(50101; "BCJ Jira Status"; Code[250])
+        {
+            Caption = 'Status In Jira';
+        }
     }
-
     keys
     {
-        key(JiraTaskId; "BCJ Jira Task Id") { }
+        key(JiraTaskId; "BCJ Jira Task Id")
+        {
+        }
     }
 }

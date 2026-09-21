@@ -10,7 +10,12 @@ tableextension 50101 "BCJ Job Setup" extends "Jobs Setup"
         field(50101; "BCJ Job Journal Batch"; Code[20])
         {
             Caption = 'Jira Integration Default Job Journal Batch';
-            TableRelation = "Job Journal Batch"."Name" where("Journal Template Name" = field("BCJ Job Journal Templ."));
+            TableRelation = "Job Journal Batch"."Name" where("Journal Template Name"=field("BCJ Job Journal Templ."));
+        }
+        field(50102; "BCJ Default Unit Of Measure"; Code[10])
+        {
+            Caption = 'Default Unit of measure for Jira Resources';
+            TableRelation = "Unit of Measure".Code;
         }
     }
 }

@@ -27,9 +27,18 @@ page 50100 "BCJ Jira Time Entries"
                 {
                     ToolTip = 'Specifies the value of the Project No. field.';
                 }
+                field("Project Description"; Rec."Project Description")
+                {
+                }
                 field("Project Task No."; Rec."Project Task No.")
                 {
                     ToolTip = 'Specifies the value of the Project Task No. field.';
+                }
+                field("Task Description"; Rec."Task Description")
+                {
+                }
+                field(Status; Rec.Status)
+                {
                 }
                 field("Time Spend Seconds"; Rec."Time Spend Seconds")
                 {
@@ -41,26 +50,36 @@ page 50100 "BCJ Jira Time Entries"
                 }
                 field(Comment; Rec.Comment)
                 {
-
+                }
+                field("Is Billable"; Rec."Is Billable")
+                {
+                    ApplicationArea = All;
+                }
+                field("Is Billed"; Rec."Is Billed")
+                {
                 }
                 field("Is Posted"; Rec."Transfer To Job Journal")
                 {
-
                 }
                 field("Skip transfer to Job Journal"; Rec."Skip transfer to Job Journal")
                 {
-
                 }
             }
         }
     }
-
     actions
     {
         area(Promoted)
         {
             actionref(CreateJournal; CreateJournalEntries)
-            { }
+            {
+            }
+            actionref(MarkBillableActionRef; MarkSelectedAsBillable)
+            {
+            }
+            actionref(MarkBilledActionRef; MarkSelectedAsBilled)
+            {
+            }
         }
         area(Processing)
         {
@@ -69,11 +88,42 @@ page 50100 "BCJ Jira Time Entries"
                 ApplicationArea = All;
                 Caption = 'Create Project Journal Entries';
                 Image = Journals;
+
                 trigger OnAction()
                 var
                     PostJiraTimeToJob: Codeunit "BCJ Post Jira Time To Job";
                 begin
                     PostJiraTimeToJob.ProcessUnpostedJiraTimeEntries();
+                end;
+            }
+            action(MarkSelectedAsBillable)
+            {
+                ApplicationArea = All;
+                Caption = 'Mark Selected Entries As Billable';
+                Image = Journals;
+
+                trigger OnAction()
+                var
+                    JiraEntries: Record "BCJ Project Time Entry";
+                begin
+                    CurrPage.SetSelectionFilter(JiraEntries);
+                    JiraEntries.ModifyAll("Is Billable", true);
+                    CurrPage.Update(false);
+                end;
+            }
+            action(MarkSelectedAsBilled)
+            {
+                ApplicationArea = All;
+                Caption = 'Mark Selected Entries As Billed';
+                Image = Journals;
+
+                trigger OnAction()
+                var
+                    JiraEntries: Record "BCJ Project Time Entry";
+                begin
+                    CurrPage.SetSelectionFilter(JiraEntries);
+                    JiraEntries.ModifyAll("Is Billed", true);
+                    CurrPage.Update(false);
                 end;
             }
         }
