@@ -31,4 +31,4 @@ Every Jira time entry has a **Billing Status**:
 
 Typical month-end flow: open the overview with date filter `lm` → mark internal work *Not Billable* → mark the rest *Billable* → bill the billable hours per customer in the billing software → mark them *Billed*.
 
-The older **Jira Time Entries** page (50100) is unchanged. Its *Is Billable* / *Is Billed* flags are kept in sync with the Billing Status; entries marked there are picked up by the new pages when the overview opens.
+The older **Jira Time Entries** page (50100) is unchanged. Its *Is Billable* / *Is Billed* flags are kept in sync with the Billing Status. When the overview opens, entries marked there are picked up: a ticked *Is Billed* always makes the entry Billed; *Is Billable* only promotes entries that are still Open.

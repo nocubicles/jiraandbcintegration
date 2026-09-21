@@ -38,14 +38,15 @@ codeunit 50103 "BCJ Billing Mgt."
     end;
 
     /// <summary>
-    /// For entries still in status Open whose legacy flags are set (e.g. marked on the old Jira Time Entries page),
-    /// sets the billing status from the flags. Entries in any other status are left untouched.
+    /// Picks up entries marked on the old Jira Time Entries page, which only sets the legacy flags.
+    /// "Is Billed" always wins (any status becomes Billed) so billed work never shows as unbilled again;
+    /// "Is Billable" only promotes entries that are still Open.
     /// </summary>
     procedure SyncStatusFromLegacyFlags()
     var
         TimeEntry: Record "BCJ Project Time Entry";
     begin
-        TimeEntry.SetRange("Billing Status", TimeEntry."Billing Status"::Open);
+        TimeEntry.SetFilter("Billing Status", '<>%1', TimeEntry."Billing Status"::Billed);
         TimeEntry.SetRange("Is Billed", true);
         if not TimeEntry.IsEmpty() then
             TimeEntry.ModifyAll("Billing Status", TimeEntry."Billing Status"::Billed);

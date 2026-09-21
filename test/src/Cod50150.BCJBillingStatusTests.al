@@ -250,32 +250,72 @@ codeunit 50150 "BCJ Billing Status Tests"
     end;
 
     [Test]
-    procedure SyncNeverChangesEntriesThatAreNotOpen()
+    procedure SyncLeavesNonOpenEntriesWithoutIsBilledUntouched()
     var
         TimeEntry: Record "BCJ Project Time Entry";
         Stem: Code[13];
         JobNo: Code[20];
     begin
-        // [SCENARIO] A status set in the new overview is an explicit user decision and outranks the
-        // legacy flags. Stale flags (e.g. Is Billable left ticked on an entry later marked Not
-        // Billable) must never override it, or the sync would silently undo the user's decision.
-        // [GIVEN] Non-Open entries whose flags disagree with their status
+        // [SCENARIO] Apart from a set Is Billed flag (see SyncIsBilledFlagWinsOverAnyStatus), a
+        // status set in the new overview is an explicit user decision and outranks the legacy
+        // flags. A stale Is Billable left ticked on an entry later marked Not Billable must not
+        // re-promote it, and cleared flags must never demote a Billed or Billable entry - the old
+        // page cannot un-bill anything, so cleared flags carry no decision.
+        // [GIVEN] Non-Open entries without Is Billed: Not Billable + Is Billable, Billed + no
+        // flags, Billable + no flags
         Stem := BCJTestLibrary.NewStem();
         JobNo := CreateJobWithTask(Stem);
         BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-NB', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::"Not Billable");
         BCJTestLibrary.SetLegacyFlags(TimeEntry, true, false);
-        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-BL', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::Billable);
-        BCJTestLibrary.SetLegacyFlags(TimeEntry, true, true);
         BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-BD', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::Billed);
+        BCJTestLibrary.SetLegacyFlags(TimeEntry, false, false);
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-BL', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::Billable);
         BCJTestLibrary.SetLegacyFlags(TimeEntry, false, false);
         // [WHEN] Sync runs
         BillingMgt.SyncStatusFromLegacyFlags();
-        // [THEN] Every status is unchanged
-        Assert.AreEqual("BCJ Billing Status"::"Not Billable", GetStatus(Stem + '-NB'), 'Not Billable entry must stay Not Billable despite Is Billable');
-        Assert.AreEqual("BCJ Billing Status"::Billable, GetStatus(Stem + '-BL'), 'Billable entry must stay Billable despite Is Billed');
+        // [THEN] Every status and every flag is unchanged
+        Assert.AreEqual("BCJ Billing Status"::"Not Billable", GetStatus(Stem + '-NB'), 'Not Billable entry must stay Not Billable despite a stale Is Billable');
         Assert.AreEqual("BCJ Billing Status"::Billed, GetStatus(Stem + '-BD'), 'Billed entry must stay Billed despite cleared flags');
-        AssertFlags(Stem + '-NB', true, false, 'Sync must not change the legacy flags of a non-Open entry');
-        AssertFlags(Stem + '-BD', false, false, 'Sync must not change the legacy flags of a non-Open entry');
+        Assert.AreEqual("BCJ Billing Status"::Billable, GetStatus(Stem + '-BL'), 'Billable entry must stay Billable when no flag is set');
+        AssertFlags(Stem + '-NB', true, false, 'Sync must not change the legacy flags of an untouched entry');
+        AssertFlags(Stem + '-BD', false, false, 'Sync must not change the legacy flags of an untouched entry');
+        AssertFlags(Stem + '-BL', false, false, 'Sync must not change the legacy flags of an untouched entry');
+    end;
+
+    [Test]
+    procedure SyncIsBilledFlagWinsOverAnyStatus()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        Stem: Code[13];
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] The legacy page "BCJ Jira Time Entries" marks entries invoiced by setting only
+        // Is Billed (ModifyAll, no validation). Under the old "only Open is promoted" rule an entry
+        // already Billable kept showing as unbilled and could be invoiced a second time. Is Billed
+        // records that an invoice exists, which is a fact, not a preference - so it always wins,
+        // whatever status the entry currently has.
+        // [GIVEN] Billable, Not Billable and Open entries with Is Billed set (Is Billable varied)
+        Stem := BCJTestLibrary.NewStem();
+        JobNo := CreateJobWithTask(Stem);
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-BL', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::Billable);
+        BCJTestLibrary.SetLegacyFlags(TimeEntry, true, true);
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-BLX', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::Billable);
+        BCJTestLibrary.SetLegacyFlags(TimeEntry, false, true);
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-NB', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::"Not Billable");
+        BCJTestLibrary.SetLegacyFlags(TimeEntry, false, true);
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-OP', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::Open);
+        BCJTestLibrary.SetLegacyFlags(TimeEntry, false, true);
+        // [WHEN] Sync runs
+        BillingMgt.SyncStatusFromLegacyFlags();
+        // [THEN] Every entry is Billed and its legacy flags are exactly as they were
+        Assert.AreEqual("BCJ Billing Status"::Billed, GetStatus(Stem + '-BL'), 'Billable entry with Is Billed must become Billed');
+        Assert.AreEqual("BCJ Billing Status"::Billed, GetStatus(Stem + '-BLX'), 'Billable entry with Is Billed but no Is Billable must become Billed');
+        Assert.AreEqual("BCJ Billing Status"::Billed, GetStatus(Stem + '-NB'), 'Not Billable entry with Is Billed must become Billed');
+        Assert.AreEqual("BCJ Billing Status"::Billed, GetStatus(Stem + '-OP'), 'Open entry with Is Billed must become Billed');
+        AssertFlags(Stem + '-BL', true, true, 'Sync must not change the legacy flags of an entry it marks Billed');
+        AssertFlags(Stem + '-BLX', false, true, 'Sync must not change the legacy flags of an entry it marks Billed');
+        AssertFlags(Stem + '-NB', false, true, 'Sync must not change the legacy flags of an entry it marks Billed');
+        AssertFlags(Stem + '-OP', false, true, 'Sync must not change the legacy flags of an entry it marks Billed');
     end;
 
     // ---------------------------------------------------------------------------------
