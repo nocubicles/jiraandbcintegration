@@ -96,7 +96,7 @@ page 50104 "BCJ Customer Reviews"
                 var
                     ReviewMail: Codeunit "BCJ Review Mail";
                 begin
-                    Message(ReviewMail.GetReviewLink(Rec));
+                    Message('%1', ReviewMail.GetReviewLink(Rec));
                 end;
             }
             action(Cancel)

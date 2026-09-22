@@ -109,14 +109,23 @@ codeunit 50108 "BCJ Review Mail"
     /// </summary>
     procedure SendReviewEmail(var Review: Record "BCJ Customer Review"): Boolean
     var
+        TempEmailAccount: Record "Email Account" temporary;
         EmailMessage: Codeunit "Email Message";
+        Email: Codeunit Email;
+        EmailScenario: Codeunit "Email Scenario";
         Recipient: Text[80];
     begin
         Recipient := GetRecipientEmail(Review);
         if Recipient = '' then
             exit(false);
-        BuildReviewEmail(Review, Recipient, EmailMessage);
-        if not TrySend(EmailMessage) then
+        // No account for the scenario (and no default account): skip rather than error, the review still exists.
+        if not EmailScenario.GetEmailAccount(Enum::"Email Scenario"::"BCJ Customer Time Review", TempEmailAccount) then
+            exit(false);
+        // Building can fail on a malformed recipient address; that must skip the mail, not roll back the reviews.
+        if not TryBuildReviewEmail(Review, Recipient, EmailMessage) then
+            exit(false);
+        // Email.Send commits before dispatching, so it must not run inside a TryFunction. It returns false on failure.
+        if not Email.Send(EmailMessage, Enum::"Email Scenario"::"BCJ Customer Time Review") then
             exit(false);
         Review."Sent To E-Mail" := Recipient;
         Review."E-Mail Sent On" := CurrentDateTime();
@@ -125,12 +134,9 @@ codeunit 50108 "BCJ Review Mail"
     end;
 
     [TryFunction]
-    local procedure TrySend(var EmailMessage: Codeunit "Email Message")
-    var
-        Email: Codeunit Email;
+    local procedure TryBuildReviewEmail(Review: Record "BCJ Customer Review"; Recipient: Text; var EmailMessage: Codeunit "Email Message")
     begin
-        if not Email.Send(EmailMessage, Enum::"Email Scenario"::"BCJ Customer Time Review") then
-            Error('');
+        BuildReviewEmail(Review, Recipient, EmailMessage);
     end;
 
     local procedure FormatHours(Hours: Decimal): Text

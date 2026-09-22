@@ -79,6 +79,16 @@ codeunit 50107 "BCJ Customer Review Mgt."
             TimeEntry.Modify(true);
         until TempOpenEntry.Next() = 0;
 
+        // Jira logs minutes, so summed hours carry many decimals. The customer sees and answers two decimals,
+        // and the approved hours are validated against this value, so round it once here.
+        ReviewLine.Reset();
+        ReviewLine.SetRange("Review No.", Review."Review No.");
+        if ReviewLine.FindSet(true) then
+            repeat
+                ReviewLine."Logged Hours" := Round(ReviewLine."Logged Hours", 0.01);
+                ReviewLine.Modify(false);
+            until ReviewLine.Next() = 0;
+
         TempReview := Review;
         TempReview.Insert();
     end;

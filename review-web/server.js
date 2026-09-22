@@ -58,21 +58,22 @@ async function getToken() {
   return tokenCache.value;
 }
 
-async function bc(method, path, body) {
+// method, path, optional JSON body, optional ETag for If-Match (defaults to "*" when a body is sent).
+async function bc(method, path, body, etag) {
   const token = await getToken();
   const headers = { Authorization: `Bearer ${token}`, Accept: 'application/json' };
   if (body !== undefined) {
     headers['Content-Type'] = 'application/json';
-    headers['If-Match'] = '*';
+    headers['If-Match'] = etag || '*';
   }
   const res = await fetch(`${bcBase}/${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   const text = await res.text();
   let json = null;
   try { json = text ? JSON.parse(text) : null; } catch { /* non-JSON body */ }
   if (!res.ok) {
-    const msg = json?.error?.message || text || res.statusText;
-    const err = new Error(msg);
+    const err = new Error(json?.error?.message || text || res.statusText);
     err.status = res.status;
+    err.code = json?.error?.code;
     throw err;
   }
   return json;
@@ -89,6 +90,16 @@ async function getLines(reviewNo) {
   const data = await bc('GET', `customerReviewLines?$filter=reviewNo eq ${reviewNo}&$orderby=taskNo`);
   return data.value || [];
 }
+
+// BC serialises enums on API pages by member name; accept the caption too, to be safe.
+const isSent = r => r.status === 'Sent' || r.status === 'Sent for Review';
+const isAnswered = r => r.status === 'Answered';
+
+// A review that was reopened keeps the customer's previous answer on its lines. Prefill from that
+// answer whenever any line carries one; a fresh review has all zeros and no comments.
+const hasStoredAnswer = lines => lines.some(l => Number(l.approvedHours) > 0 || (l.customerComment || '').trim() !== '');
+
+function round2(n) { return Math.round(n * 100) / 100; }
 
 // ---------------------------------------------------------------------------
 // HTML
@@ -131,37 +142,45 @@ function layout(title, body) {
   .notice { padding: 12px 14px; border-radius: 8px; border: 1px solid var(--line); margin: 16px 0; }
   .notice.ok { border-color: var(--ok); }
   .notice.warn { border-color: var(--warn); }
-  @media (max-width: 600px) {
-    th.hide, td.hide { display: none; }
-    .comment-row td { border-bottom: 1px solid var(--line); }
-  }
 </style>
 </head>
 <body><main>${body}</main></body>
 </html>`;
 }
 
-function reviewPage(review, lines, message) {
+// `values` optionally overrides what the inputs show (used to keep the customer's typed input after a validation error).
+function reviewPage(review, lines, message, values) {
+  const prefillStored = values ? true : hasStoredAnswer(lines);
+  const approvedOf = l => {
+    if (values && values[l.systemId]) return values[l.systemId].approved;
+    return prefillStored ? Number(l.approvedHours) : Number(l.loggedHours);
+  };
+  const commentOf = l => (values && values[l.systemId]) ? values[l.systemId].comment : (l.customerComment || '');
   const rows = lines.map(l => `
     <tr>
       <td><div class="task">${esc(l.taskNo)}</div><div class="desc">${esc(l.taskDescription)}</div>
-          <input type="text" name="comment_${esc(l.systemId)}" placeholder="Comment (optional)" maxlength="250" value="${esc(l.customerComment)}" style="margin-top:6px"></td>
+          <input type="text" name="comment_${esc(l.systemId)}" placeholder="Comment (optional)" maxlength="250" value="${esc(commentOf(l))}" style="margin-top:6px">
+          <input type="hidden" name="etag_${esc(l.systemId)}" value="${esc(l['@odata.etag'] || '')}"></td>
       <td class="num">${hours(l.loggedHours)}</td>
-      <td class="num"><input type="number" name="approved_${esc(l.systemId)}" min="0" max="${Number(l.loggedHours)}" step="0.25"
-          value="${Number(l.approvedHours) || Number(l.loggedHours)}" data-logged="${Number(l.loggedHours)}" required></td>
+      <td class="num"><input type="number" name="approved_${esc(l.systemId)}" min="0" max="${round2(Number(l.loggedHours))}" step="0.01"
+          value="${esc(approvedOf(l))}" data-logged="${round2(Number(l.loggedHours))}" required></td>
     </tr>`).join('');
   const totalLogged = lines.reduce((s, l) => s + Number(l.loggedHours || 0), 0);
+  const totalApproved = lines.reduce((s, l) => s + (Number(approvedOf(l)) || 0), 0);
+  const reopenedNotice = (!values && prefillStored)
+    ? '<div class="notice">This review was reopened. Your previous answer is filled in below; adjust it and submit again.</div>' : '';
   return layout(`${cfg.brand}: ${review.projectNo}`, `
     <h1>${esc(cfg.brand)}</h1>
     <p class="muted">${esc(review.customerName)} &middot; ${esc(review.projectDescription || review.projectNo)} &middot; review #${esc(review.reviewNo)}</p>
     <p>Below are the hours logged on your project that we would like to invoice. For each task, confirm the hours you approve.
        Reduce the number if you agree to only part of the hours, or set it to 0 if the task should not be billed. Comments are optional.</p>
+    ${reopenedNotice}
     ${message ? `<div class="notice warn">${esc(message)}</div>` : ''}
     <form method="post" action="/review/${esc(review.accessToken)}">
       <table>
         <thead><tr><th>Task</th><th class="num">Logged</th><th class="num">Approved</th></tr></thead>
         <tbody>${rows}</tbody>
-        <tfoot><tr><td>Total hours</td><td class="num">${hours(totalLogged)}</td><td class="num" id="total-approved">${hours(totalLogged)}</td></tr></tfoot>
+        <tfoot><tr><td>Total hours</td><td class="num">${hours(totalLogged)}</td><td class="num" id="total-approved">${hours(totalApproved)}</td></tr></tfoot>
       </table>
       <div class="actions">
         <button type="submit">Submit answer</button>
@@ -188,10 +207,11 @@ function answeredPage(review, lines) {
   const rows = lines.map(l => `<tr><td><div class="task">${esc(l.taskNo)}</div><div class="desc">${esc(l.taskDescription)}</div>${l.customerComment ? `<div class="desc muted">${esc(l.customerComment)}</div>` : ''}</td>
     <td class="num">${hours(l.loggedHours)}</td><td class="num">${hours(l.approvedHours)}</td></tr>`).join('');
   const sum = k => lines.reduce((s, l) => s + Number(l[k] || 0), 0);
+  const answeredOn = review.answeredOn && !review.answeredOn.startsWith('0001-') ? new Date(review.answeredOn).toLocaleDateString('en-GB') : '';
   return layout(`${cfg.brand}: ${review.projectNo}`, `
     <h1>${esc(cfg.brand)}</h1>
     <p class="muted">${esc(review.customerName)} &middot; ${esc(review.projectDescription || review.projectNo)} &middot; review #${esc(review.reviewNo)}</p>
-    <div class="notice ok">Thank you, your answer has been recorded${review.answeredOn ? ` on ${esc(new Date(review.answeredOn).toLocaleDateString('en-GB'))}` : ''}.</div>
+    <div class="notice ok">Thank you, your answer has been recorded${answeredOn ? ` on ${esc(answeredOn)}` : ''}.</div>
     <table>
       <thead><tr><th>Task</th><th class="num">Logged</th><th class="num">Approved</th></tr></thead>
       <tbody>${rows}</tbody>
@@ -217,43 +237,58 @@ function readBody(req) {
   });
 }
 
+const NOT_VALID = 'This review link is not valid.';
+
 async function handleGet(res, token) {
   const review = await findReview(token);
-  if (!review) return send(res, 404, messagePage('Not found', 'This review link is not valid.', 'warn'));
+  if (!review) return send(res, 404, messagePage('Not found', NOT_VALID, 'warn'));
   const lines = await getLines(review.reviewNo);
-  if (review.status !== 'Sent') {
-    if (review.status === 'Answered') return send(res, 200, answeredPage(review, lines));
-    return send(res, 410, messagePage('Cancelled', 'This review has been cancelled. Please contact us if you have questions.', 'warn'));
-  }
+  if (isAnswered(review)) return send(res, 200, answeredPage(review, lines));
+  if (!isSent(review)) return send(res, 410, messagePage('Cancelled', 'This review has been cancelled. Please contact us if you have questions.', 'warn'));
   return send(res, 200, reviewPage(review, lines, null));
 }
 
 async function handlePost(req, res, token) {
   const review = await findReview(token);
-  if (!review) return send(res, 404, messagePage('Not found', 'This review link is not valid.', 'warn'));
+  if (!review) return send(res, 404, messagePage('Not found', NOT_VALID, 'warn'));
   const lines = await getLines(review.reviewNo);
-  if (review.status !== 'Sent') return send(res, 409, messagePage('Already answered', 'This review has already been answered.', 'warn'));
+  if (isAnswered(review)) return send(res, 409, answeredPage(review, lines));
+  if (!isSent(review)) return send(res, 410, messagePage('Cancelled', 'This review has been cancelled. Please contact us if you have questions.', 'warn'));
 
   const form = new URLSearchParams(await readBody(req));
+  const values = {};
   const updates = [];
+  let problem = null;
   for (const line of lines) {
     const raw = form.get(`approved_${line.systemId}`);
-    const approved = Number(raw);
-    if (raw === null || raw === '' || !Number.isFinite(approved) || approved < 0 || approved > Number(line.loggedHours)) {
-      return send(res, 400, reviewPage(review, lines, `Approved hours for ${line.taskNo} must be between 0 and ${hours(line.loggedHours)}.`));
-    }
     const comment = (form.get(`comment_${line.systemId}`) || '').slice(0, 250);
-    updates.push({ line, approved: Math.round(approved * 100) / 100, comment });
+    const etag = form.get(`etag_${line.systemId}`) || '*';
+    values[line.systemId] = { approved: raw ?? '', comment };
+    const logged = round2(Number(line.loggedHours));
+    const approved = Number(String(raw ?? '').replace(',', '.'));
+    if (raw === null || raw === '' || !Number.isFinite(approved) || approved < 0 || round2(approved) > logged) {
+      problem = problem || `Approved hours for ${line.taskNo} must be between 0 and ${hours(logged)}.`;
+      continue;
+    }
+    // Round to what BC stores and never exceed the logged hours after rounding.
+    updates.push({ line, approved: Math.min(round2(approved), logged), comment, etag });
   }
+  if (problem) return send(res, 400, reviewPage(review, lines, problem, values));
 
   try {
     for (const u of updates) {
-      await bc('PATCH', `customerReviewLines(${u.line.systemId})`, { approvedHours: u.approved, customerComment: u.comment });
+      await bc('PATCH', `customerReviewLines(${u.line.systemId})`, { approvedHours: u.approved, customerComment: u.comment }, u.etag);
     }
     await bc('POST', `customerReviews(${review.systemId})/Microsoft.NAV.submit`, {});
   } catch (e) {
-    console.error('submit failed', e);
-    return send(res, 502, reviewPage(review, await getLines(review.reviewNo), `Your answer could not be saved: ${e.message}. Please try again.`));
+    console.error(`submit failed for review ${review.reviewNo}:`, e.status, e.code, e.message);
+    const fresh = await findReview(token);
+    const freshLines = await getLines(review.reviewNo);
+    if (fresh && isAnswered(fresh)) return send(res, 200, answeredPage(fresh, freshLines));
+    if (e.status === 412) {
+      return send(res, 409, reviewPage(fresh || review, freshLines, 'This review was changed in the meantime, for example in another browser tab. The current values are shown below; please check them and submit again.'));
+    }
+    return send(res, 502, reviewPage(fresh || review, freshLines, 'Your answer could not be saved. Please try again, or contact us if the problem persists.', values));
   }
   const after = await findReview(token);
   return send(res, 200, answeredPage(after || review, await getLines(review.reviewNo)));
@@ -266,7 +301,7 @@ const server = http.createServer(async (req, res) => {
     const m = url.pathname.match(/^\/review\/([^/]+)\/?$/);
     if (!m) return send(res, 404, messagePage('Not found', 'Page not found.', 'warn'));
     const token = m[1].toUpperCase();
-    if (!TOKEN_RE.test(token)) return send(res, 404, messagePage('Not found', 'This review link is not valid.', 'warn'));
+    if (!TOKEN_RE.test(token)) return send(res, 404, messagePage('Not found', NOT_VALID, 'warn'));
     if (req.method === 'GET') return await handleGet(res, token);
     if (req.method === 'POST') return await handlePost(req, res, token);
     res.writeHead(405); res.end();

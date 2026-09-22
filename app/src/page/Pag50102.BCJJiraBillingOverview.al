@@ -450,7 +450,7 @@ page 50102 "BCJ Jira Billing Overview"
     var
         SelectedLine: Record "BCJ Billing Overview Buffer" temporary;
         TimeEntry: Record "BCJ Project Time Entry";
-        BillingMgt: Codeunit "BCJ Billing Mgt.";
+        MarkedEntry: Record "BCJ Project Time Entry";
         ChangedCount: Integer;
         BilledCount: Integer;
         InReviewCount: Integer;
@@ -473,10 +473,12 @@ page 50102 "BCJ Jira Billing Overview"
             repeat
                 SetTimeEntryFilters(TimeEntry);
                 ChangedCount += BillingOverviewMgt.SetStatusForLine(SelectedLine, TimeEntry, NewStatus);
-                SetTimeEntryFilters(TimeEntry);
-                BillingOverviewMgt.ApplyLineFilter(SelectedLine, TimeEntry);
-                InReviewCount += BillingMgt.CountEntriesInReview(TimeEntry);
             until SelectedLine.Next() = 0;
+        // Count the skipped entries over the de-duplicated selection, so overlapping rows are not counted twice.
+        SetTimeEntryFilters(TimeEntry);
+        BillingOverviewMgt.MarkEntriesForLines(SelectedLine, TimeEntry, MarkedEntry);
+        MarkedEntry.SetRange("Billing Status", MarkedEntry."Billing Status"::"Sent for Review");
+        InReviewCount := MarkedEntry.Count();
         RefreshOverview();
         if InReviewCount > 0 then
             Message(EntriesUpdatedMsg + ' ' + EntriesInReviewMsg, ChangedCount, InReviewCount)
