@@ -11,3 +11,7 @@ Jira → Business Central time-entry sync (PTE, publisher integrated.ee, app id 
 - Republishing the main app uninstalls the dev-published test app — republish the test app after it (tests then show as "skipped" until you do).
 - The `al_publish` MCP tool may report failure without details; use `al publishapp <file> --environmentname sandbox --environmenttype Sandbox --tenant <tenant>` to see the server message. A rebuild is needed to get a new package id before re-publishing.
 - Compile the test app with the CLI: `al compile /project:test /packagecachepath:test\.alpackages` (copy the freshly built main .app into `test/.alpackages` first).
+
+## Production
+- Same tenant, environment `Production`, company "Integrated Technologies OÜ" (id `7695d01d-d042-f111-a820-7ced8d71cbf2`). The app is installed as a PTE via Extension Management upload, never dev-published.
+- Deploy: `bash deploy-prod.sh` (automation API `extensionUpload`, schema sync mode Add, polls `extensionDeploymentStatus`). Takes ~6 minutes. Confirm with the user before running it.
