@@ -124,7 +124,7 @@ codeunit 50100 "BCJ Process Jira Queue"
             if Resource.Get(ResourceNo)then exit(Resource."No.");
         end;
     end;
-    procedure SyncJobTask(JobNo: Code[20]; JobTaskNo: Code[20]; JobTaskDescription: Text[100]; IssueId: Text; Status: code[250]): Boolean var
+    procedure SyncJobTask(JobNo: Code[20]; JobTaskNo: Code[20]; JobTaskDescription: Text; IssueId: Text; Status: Code[250]): Boolean var
         Job: Record Job;
         JobTask: Record "Job Task";
     begin

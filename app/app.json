@@ -2,7 +2,7 @@
   "id": "f5cc8010-9fee-4668-beaa-f8ec318f3e1b",
   "name": "bcjiraintegration",
   "publisher": "integrated.ee",
-  "version": "1.0.111.0",
+  "version": "1.0.112.0",
   "runtime": "12.1",
   "target": "Cloud",
   "application": "23.0.0.0",
