@@ -39,6 +39,11 @@ table 50101 "BCJ Jira Integration Setup"
             DataClassification = CustomerContent;
             Caption = 'Last Synced Timestamp for deleted Work Log Entries';
         }
+        field(8; "Review Base URL"; Text[250])
+        {
+            DataClassification = CustomerContent;
+            Caption = 'Customer Review Base URL';
+        }
     }
     keys
     {

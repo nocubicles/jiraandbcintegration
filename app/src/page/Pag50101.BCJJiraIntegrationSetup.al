@@ -34,6 +34,11 @@ page 50101 "BCJ Jira Integration Setup"
             field("Sync Start Date"; Rec."Sync Start Date")
             {
             }
+            field("Review Base URL"; Rec."Review Base URL")
+            {
+                ExtendedDatatype = URL;
+                ToolTip = 'Specifies the address of the customer review web app, for example https://review.integrated.ee. Review links sent to customers are built as <base URL>/review/<token>.';
+            }
         }
     }
     actions

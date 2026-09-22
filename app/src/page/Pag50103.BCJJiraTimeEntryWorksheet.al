@@ -64,7 +64,16 @@ page 50103 "BCJ Jira Time Entry Worksheet"
                 field("Billing Status"; Rec."Billing Status")
                 {
                     StyleExpr = StatusStyle;
-                    ToolTip = 'Specifies whether the time entry is open (not reviewed), billable, not billable or billed.';
+                    ToolTip = 'Specifies whether the time entry is open (not reviewed), sent for customer review, billable, not billable or billed.';
+                }
+                field("Billable Hours"; Rec."Billable Hours")
+                {
+                    ToolTip = 'Specifies the hours to bill for this entry. Equal to the logged hours unless the customer approved only part of the hours of the task.';
+                }
+                field("Review No."; Rec."Review No.")
+                {
+                    Visible = false;
+                    ToolTip = 'Specifies the customer review the entry was sent with.';
                 }
             }
         }
@@ -162,7 +171,12 @@ page 50103 "BCJ Jira Time Entry Worksheet"
         view(Unbilled)
         {
             Caption = 'Unbilled';
-            Filters = where("Billing Status" = filter(Open | Billable));
+            Filters = where("Billing Status" = filter(Open | "Sent for Review" | Billable));
+        }
+        view(InReview)
+        {
+            Caption = 'Sent for Review';
+            Filters = where("Billing Status" = const("Sent for Review"));
         }
         view(OpenEntries)
         {
@@ -185,6 +199,8 @@ page 50103 "BCJ Jira Time Entry Worksheet"
                 StatusStyle := 'Favorable';
             Rec."Billing Status"::"Not Billable":
                 StatusStyle := 'Subordinate';
+            Rec."Billing Status"::"Sent for Review":
+                StatusStyle := 'Ambiguous';
             else
                 StatusStyle := 'Standard';
         end;
@@ -193,16 +209,22 @@ page 50103 "BCJ Jira Time Entry Worksheet"
     var
         StatusStyle: Text;
         EntriesUpdatedMsg: Label '%1 time entries updated.', Comment = '%1 = number of time entries';
+        EntriesInReviewMsg: Label '%1 time entries were not changed because they are waiting for a customer answer.', Comment = '%1 = number of time entries';
 
     local procedure SetStatusForSelection(NewStatus: Enum "BCJ Billing Status")
     var
         TimeEntry: Record "BCJ Project Time Entry";
         BillingMgt: Codeunit "BCJ Billing Mgt.";
         ChangedCount: Integer;
+        InReviewCount: Integer;
     begin
         CurrPage.SetSelectionFilter(TimeEntry);
         ChangedCount := BillingMgt.SetBillingStatus(TimeEntry, NewStatus);
+        InReviewCount := BillingMgt.CountEntriesInReview(TimeEntry);
         CurrPage.Update(false);
-        Message(EntriesUpdatedMsg, ChangedCount);
+        if InReviewCount > 0 then
+            Message(EntriesUpdatedMsg + ' ' + EntriesInReviewMsg, ChangedCount, InReviewCount)
+        else
+            Message(EntriesUpdatedMsg, ChangedCount);
     end;
 }

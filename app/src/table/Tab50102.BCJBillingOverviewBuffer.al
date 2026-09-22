@@ -91,6 +91,16 @@ table 50102 "BCJ Billing Overview Buffer"
             Caption = 'Unbilled Hours';
             DecimalPlaces = 0 : 2;
         }
+        field(26; "Sent for Review Hours"; Decimal)
+        {
+            Caption = 'Sent for Review Hours';
+            DecimalPlaces = 0 : 2;
+        }
+        field(27; "Allocated Hours"; Decimal)
+        {
+            Caption = 'Allocated Hours';
+            DecimalPlaces = 0 : 2;
+        }
     }
     keys
     {

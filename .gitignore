@@ -4,3 +4,7 @@
 .vscode/.altemplates
 .alpackages/
 *.app
+
+# review-web
+review-web/.env
+review-web/node_modules/

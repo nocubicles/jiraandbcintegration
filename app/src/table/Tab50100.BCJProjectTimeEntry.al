@@ -42,6 +42,16 @@ table 50100 "BCJ Project Time Entry"
         {
             Caption = 'Time Spent in Hours';
             Editable = false;
+
+            trigger OnValidate()
+            begin
+                // Undecided entries stay fully billable; decided ones keep their allocation but never exceed the logged hours.
+                if "Billing Status" in ["Billing Status"::Open, "Billing Status"::"Sent for Review"] then
+                    "Billable Hours" := "Time Spent in Hours"
+                else
+                    if "Billable Hours" > "Time Spent in Hours" then
+                        "Billable Hours" := "Time Spent in Hours";
+            end;
         }
         field(9; "Jira Issue Id"; Text[50])
         {
@@ -109,6 +119,22 @@ table 50100 "BCJ Project Time Entry"
             FieldClass = FlowField;
             CalcFormula = lookup(Job."Bill-to Customer No." where("No."=field("Project No.")));
         }
+        field(20; "Billable Hours"; Decimal)
+        {
+            Caption = 'Billable Hours';
+            DecimalPlaces = 0 : 2;
+            MinValue = 0;
+            Editable = false;
+            DataClassification = CustomerContent;
+        }
+        field(21; "Review No."; Integer)
+        {
+            Caption = 'Customer Review No.';
+            Editable = false;
+            DataClassification = CustomerContent;
+            TableRelation = "BCJ Customer Review"."Review No.";
+            ValidateTableRelation = false;
+        }
     }
     keys
     {
@@ -122,5 +148,14 @@ table 50100 "BCJ Project Time Entry"
         key(BillingStatus; "Billing Status", "Posting Date")
         {
         }
+        key(ReviewAlloc; "Review No.", "Project Task No.", "Posting Date", "Jira ID")
+        {
+        }
     }
+
+    trigger OnInsert()
+    begin
+        if "Billable Hours" = 0 then
+            "Billable Hours" := "Time Spent in Hours";
+    end;
 }

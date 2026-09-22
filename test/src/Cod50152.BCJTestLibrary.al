@@ -97,6 +97,10 @@ codeunit 50152 "BCJ Test Library"
         TimeEntry."Posting Date" := PostingDate;
         TimeEntry."Time Spent in Hours" := Hours;
         TimeEntry."Time Spend Seconds" := Round(Hours * 3600, 1);
+        // Insert(false) skips OnInsert, which is what normally seeds the allocation, so the
+        // fixture has to do it: a freshly synced worklog is fully billable until someone says
+        // otherwise. Tests that need a partial allocation overwrite it afterwards.
+        TimeEntry."Billable Hours" := Hours;
         TimeEntry.Comment := CopyStr('Worklog ' + JiraId, 1, MaxStrLen(TimeEntry.Comment));
         // Direct assignment: fixtures set the status without triggering flag sync, so tests
         // can control the legacy flags independently.
@@ -112,5 +116,58 @@ codeunit 50152 "BCJ Test Library"
         TimeEntry."Is Billable" := IsBillable;
         TimeEntry."Is Billed" := IsBilled;
         TimeEntry.Modify(false);
+    end;
+
+    procedure EnsureSetup(BaseUrl: Text[250])
+    var
+        JiraIntegrationSetup: Record "BCJ Jira Integration Setup";
+    begin
+        // The setup singleton may or may not exist in a sandbox and must never be left with a
+        // stale review base URL from another test, so this is insert-or-update, never cached.
+        if not JiraIntegrationSetup.Get() then begin
+            JiraIntegrationSetup.Init();
+            JiraIntegrationSetup.PK := 0;
+            JiraIntegrationSetup.Insert(false);
+        end;
+        JiraIntegrationSetup."Review Base URL" := BaseUrl;
+        JiraIntegrationSetup.Modify(false);
+    end;
+
+    procedure CreateContact(ContactNo: Code[20]; Email: Text[80])
+    var
+        Contact: Record Contact;
+    begin
+        // Insert(false)/Modify(false) on purpose: a validated contact pulls in business relations,
+        // salutation and marketing setup that the review mail code never looks at.
+        if Contact.Get(ContactNo) then begin
+            Contact."E-Mail" := Email;
+            Contact.Modify(false);
+            exit;
+        end;
+        Contact.Init();
+        Contact."No." := ContactNo;
+        Contact.Name := CopyStr('Contact ' + ContactNo, 1, MaxStrLen(Contact.Name));
+        Contact."E-Mail" := Email;
+        Contact.Insert(false);
+    end;
+
+    procedure SetJobBillToContact(JobNo: Code[20]; ContactNo: Code[20])
+    var
+        Job: Record Job;
+    begin
+        // Direct assignment on purpose: validating Bill-to Contact No. resolves contact business
+        // relations and can overwrite the bill-to customer, which the fixture has already chosen.
+        Job.Get(JobNo);
+        Job."Bill-to Contact No." := ContactNo;
+        Job.Modify(false);
+    end;
+
+    procedure SetCustomerEmail(CustomerNo: Code[20]; Email: Text[80])
+    var
+        Customer: Record Customer;
+    begin
+        Customer.Get(CustomerNo);
+        Customer."E-Mail" := Email;
+        Customer.Modify(false);
     end;
 }

@@ -81,6 +81,37 @@ codeunit 50104 "BCJ Billing Overview Mgt."
     end;
 
     /// <summary>
+    /// Marks on TimeEntry every time entry that belongs to any line in SelectedLine and is within the filters of TimeEntryFilter.
+    /// On return TimeEntry is reset with MarkedOnly. Returns the number of distinct entries marked.
+    /// </summary>
+    procedure MarkEntriesForLines(var SelectedLine: Record "BCJ Billing Overview Buffer" temporary; var TimeEntryFilter: Record "BCJ Project Time Entry"; var TimeEntry: Record "BCJ Project Time Entry"): Integer
+    var
+        LineEntry: Record "BCJ Project Time Entry";
+        MarkedCount: Integer;
+    begin
+        TimeEntry.Reset();
+        TimeEntry.ClearMarks();
+        if SelectedLine.FindSet() then
+            repeat
+                LineEntry.Reset();
+                LineEntry.CopyFilters(TimeEntryFilter);
+                ApplyLineFilter(SelectedLine, LineEntry);
+                LineEntry.SetLoadFields("Jira ID", "Jira Issue Id");
+                if LineEntry.FindSet() then
+                    repeat
+                        if TimeEntry.Get(LineEntry."Jira ID", LineEntry."Jira Issue Id") then
+                            if not TimeEntry.Mark() then begin
+                                TimeEntry.Mark(true);
+                                MarkedCount += 1;
+                            end;
+                    until LineEntry.Next() = 0;
+            until SelectedLine.Next() = 0;
+        // No Reset here: it would discard the marks just set. Filters were cleared before marking.
+        TimeEntry.MarkedOnly(true);
+        exit(MarkedCount);
+    end;
+
+    /// <summary>
     /// Sets NewStatus on all time entries that belong to OverviewLine and are within the filters of TimeEntryFilter. Returns the number of entries changed.
     /// </summary>
     procedure SetStatusForLine(OverviewLine: Record "BCJ Billing Overview Buffer"; var TimeEntryFilter: Record "BCJ Project Time Entry"; NewStatus: Enum "BCJ Billing Status"): Integer
@@ -101,7 +132,7 @@ codeunit 50104 "BCJ Billing Overview Mgt."
         EntryNo: Integer;
     begin
         TimeEntry.CopyFilters(TimeEntryFilter);
-        TimeEntry.SetLoadFields("Project No.", "Project Task No.", "BC Resource No.", "Posting Date", "Time Spent in Hours", "Billing Status");
+        TimeEntry.SetLoadFields("Project No.", "Project Task No.", "BC Resource No.", "Posting Date", "Time Spent in Hours", "Billable Hours", "Billing Status");
         if IncludeTimeEntries then
             TimeEntry.AddLoadFields(Comment);
         if not TimeEntry.FindSet() then
@@ -128,7 +159,8 @@ codeunit 50104 "BCJ Billing Overview Mgt."
             TempEntryLine."Posting Date" := TimeEntry."Posting Date";
             TempEntryLine."Billing Status" := TimeEntry."Billing Status";
             TempEntryLine.Description := CopyStr(TimeEntry.Comment, 1, MaxStrLen(TempEntryLine.Description));
-            AddHours(TempEntryLine, TimeEntry."Billing Status", TimeEntry."Time Spent in Hours");
+            TempEntryLine."Allocated Hours" := TimeEntry."Billable Hours";
+            AddHours(TempEntryLine, TimeEntry."Billing Status", TimeEntry."Time Spent in Hours", TimeEntry."Billable Hours");
             TempEntryLine.Insert();
         until TimeEntry.Next() = 0;
     end;
@@ -183,23 +215,40 @@ codeunit 50104 "BCJ Billing Overview Mgt."
     local procedure AddHoursToLine(var Buffer: Record "BCJ Billing Overview Buffer" temporary; LineNo: Integer; EntryLine: Record "BCJ Billing Overview Buffer" temporary)
     begin
         Buffer.Get(LineNo);
-        AddHours(Buffer, EntryLine."Billing Status", EntryLine."Total Hours");
+        AddHours(Buffer, EntryLine."Billing Status", EntryLine."Total Hours", EntryLine."Allocated Hours");
         Buffer.Modify();
     end;
 
-    local procedure AddHours(var Line: Record "BCJ Billing Overview Buffer" temporary; Status: Enum "BCJ Billing Status"; Hours: Decimal)
+    /// <summary>
+    /// Adds one entry's hours to the buckets of Line. LoggedHours is what Jira logged; AllocatedHours is the
+    /// entry's Billable Hours. For Billable and Billed entries only the allocated part counts in that bucket
+    /// and the rest is Not Billable, so the five buckets always add up to Total Hours.
+    /// </summary>
+    local procedure AddHours(var Line: Record "BCJ Billing Overview Buffer" temporary; Status: Enum "BCJ Billing Status"; LoggedHours: Decimal; AllocatedHours: Decimal)
     begin
-        Line."Total Hours" += Hours;
+        if AllocatedHours > LoggedHours then
+            AllocatedHours := LoggedHours;
+        if AllocatedHours < 0 then
+            AllocatedHours := 0;
+        Line."Total Hours" += LoggedHours;
         case Status of
             Status::Open:
-                Line."Open Hours" += Hours;
+                Line."Open Hours" += LoggedHours;
+            Status::"Sent for Review":
+                Line."Sent for Review Hours" += LoggedHours;
             Status::Billable:
-                Line."Billable Hours" += Hours;
+                begin
+                    Line."Billable Hours" += AllocatedHours;
+                    Line."Not Billable Hours" += LoggedHours - AllocatedHours;
+                end;
             Status::"Not Billable":
-                Line."Not Billable Hours" += Hours;
+                Line."Not Billable Hours" += LoggedHours;
             Status::Billed:
-                Line."Billed Hours" += Hours;
+                begin
+                    Line."Billed Hours" += AllocatedHours;
+                    Line."Not Billable Hours" += LoggedHours - AllocatedHours;
+                end;
         end;
-        Line."Unbilled Hours" := Line."Open Hours" + Line."Billable Hours";
+        Line."Unbilled Hours" := Line."Open Hours" + Line."Sent for Review Hours" + Line."Billable Hours";
     end;
 }

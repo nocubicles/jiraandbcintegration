@@ -1,0 +1,11 @@
+{
+  "name": "bcjira-review-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Customer time review page for bcjiraintegration (Business Central)",
+  "main": "server.js",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node server.js"
+  }
+}

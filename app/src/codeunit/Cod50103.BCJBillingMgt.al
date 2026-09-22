@@ -12,8 +12,9 @@ codeunit 50103 "BCJ Billing Mgt."
     begin
         EntryToChange.Copy(TimeEntry);
         // Own filter group, so a caller's filter on Billing Status is kept (filter groups are combined with AND).
+        // Entries waiting for a customer answer are never re-decided here; cancel the review first.
         EntryToChange.FilterGroup(10);
-        EntryToChange.SetFilter("Billing Status", '<>%1', NewStatus);
+        EntryToChange.SetFilter("Billing Status", '<>%1&<>%2', NewStatus, EntryToChange."Billing Status"::"Sent for Review");
         EntryToChange.FilterGroup(0);
         if EntryToChange.FindSet() then
             repeat
@@ -23,6 +24,20 @@ codeunit 50103 "BCJ Billing Mgt."
                 ChangedCount += 1;
             until EntryToChange.Next() = 0;
         exit(ChangedCount);
+    end;
+
+    /// <summary>
+    /// Returns the number of entries within the filters of TimeEntry that are waiting for a customer answer.
+    /// </summary>
+    procedure CountEntriesInReview(var TimeEntry: Record "BCJ Project Time Entry"): Integer
+    var
+        EntryInReview: Record "BCJ Project Time Entry";
+    begin
+        EntryInReview.Copy(TimeEntry);
+        EntryInReview.FilterGroup(10);
+        EntryInReview.SetRange("Billing Status", EntryInReview."Billing Status"::"Sent for Review");
+        EntryInReview.FilterGroup(0);
+        exit(EntryInReview.Count());
     end;
 
     /// <summary>
@@ -46,7 +61,7 @@ codeunit 50103 "BCJ Billing Mgt."
     var
         TimeEntry: Record "BCJ Project Time Entry";
     begin
-        TimeEntry.SetFilter("Billing Status", '<>%1', TimeEntry."Billing Status"::Billed);
+        TimeEntry.SetFilter("Billing Status", '<>%1&<>%2', TimeEntry."Billing Status"::Billed, TimeEntry."Billing Status"::"Sent for Review");
         TimeEntry.SetRange("Is Billed", true);
         if not TimeEntry.IsEmpty() then
             TimeEntry.ModifyAll("Billing Status", TimeEntry."Billing Status"::Billed);

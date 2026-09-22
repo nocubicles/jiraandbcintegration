@@ -78,8 +78,8 @@ page 50102 "BCJ Jira Billing Overview"
                 field(StatusViewCtrl; StatusView)
                 {
                     Caption = 'Show';
-                    OptionCaption = 'Unbilled,Open,Billable,Not Billable,Billed,All';
-                    ToolTip = 'Specifies which time entries to include. Unbilled shows entries that are Open or Billable, i.e. everything that is not billed yet and not excluded from billing.';
+                    OptionCaption = 'Unbilled,Open,Sent for Review,Billable,Not Billable,Billed,All';
+                    ToolTip = 'Specifies which time entries to include. Unbilled shows entries that are Open, Sent for Review or Billable, i.e. everything that is not billed yet and not excluded from billing.';
 
                     trigger OnValidate()
                     begin
@@ -159,13 +159,17 @@ page 50102 "BCJ Jira Billing Overview"
                 {
                     ToolTip = 'Specifies the hours not reviewed yet.';
                 }
+                field("Sent for Review Hours"; Rec."Sent for Review Hours")
+                {
+                    ToolTip = 'Specifies the hours sent to the customer and waiting for an answer.';
+                }
                 field("Billable Hours"; Rec."Billable Hours")
                 {
-                    ToolTip = 'Specifies the hours marked as billable and waiting to be billed.';
+                    ToolTip = 'Specifies the hours marked as billable and waiting to be billed. For entries the customer approved only partly, only the approved part counts here.';
                 }
                 field("Not Billable Hours"; Rec."Not Billable Hours")
                 {
-                    ToolTip = 'Specifies the hours marked as not billable.';
+                    ToolTip = 'Specifies the hours marked as not billable, including the part of partly approved entries that the customer did not approve.';
                 }
                 field("Billed Hours"; Rec."Billed Hours")
                 {
@@ -240,9 +244,36 @@ page 50102 "BCJ Jira Billing Overview"
                     end;
                 }
             }
+            action(SendForReview)
+            {
+                Caption = 'Send for Customer Review';
+                Image = SendApprovalRequest;
+                ToolTip = 'Create a customer review per project from the open time entries under the selected lines and e-mail it to the bill-to contact of the project. The entries wait as Sent for Review until the customer answers. Only entries within the current filters are included.';
+
+                trigger OnAction()
+                begin
+                    SendSelectionForReview();
+                end;
+            }
         }
         area(Navigation)
         {
+            action(CustomerReviews)
+            {
+                Caption = 'Customer Reviews';
+                Image = Questionaire;
+                ToolTip = 'Open the customer reviews, filtered to the current project when one is selected.';
+
+                trigger OnAction()
+                var
+                    Review: Record "BCJ Customer Review";
+                begin
+                    if Rec."Project No." <> '' then
+                        Review.SetRange("Project No.", Rec."Project No.");
+                    Page.RunModal(Page::"BCJ Customer Reviews", Review);
+                    RefreshOverview();
+                end;
+            }
             action(TimeEntries)
             {
                 Caption = 'Time Entries';
@@ -295,6 +326,9 @@ page 50102 "BCJ Jira Billing Overview"
                 actionref(MarkOpen_Promoted; MarkOpen)
                 {
                 }
+                actionref(SendForReview_Promoted; SendForReview)
+                {
+                }
                 actionref(Refresh_Promoted; Refresh)
                 {
                 }
@@ -304,6 +338,9 @@ page 50102 "BCJ Jira Billing Overview"
                 Caption = 'Navigate';
 
                 actionref(TimeEntries_Promoted; TimeEntries)
+                {
+                }
+                actionref(CustomerReviews_Promoted; CustomerReviews)
                 {
                 }
                 actionref(ProjectCard_Promoted; ProjectCard)
@@ -339,6 +376,8 @@ page 50102 "BCJ Jira Billing Overview"
                 StatusStyle := 'Favorable';
             Rec."Billing Status"::"Not Billable":
                 StatusStyle := 'Subordinate';
+            Rec."Billing Status"::"Sent for Review":
+                StatusStyle := 'Ambiguous';
             else
                 StatusStyle := 'Standard';
         end;
@@ -349,13 +388,15 @@ page 50102 "BCJ Jira Billing Overview"
         DateFilter: Text;
         CustomerFilter: Text;
         ProjectFilter: Text;
-        StatusView: Option Unbilled,Open,Billable,"Not Billable",Billed,All;
+        StatusView: Option Unbilled,Open,"Sent for Review",Billable,"Not Billable",Billed,All;
         ChangeBilledQst: Label '%1 of the time entries under the selected lines are already billed. Change them to %2 as well?', Comment = '%1 = number of billed time entries, %2 = new billing status';
         ShowTimeEntries: Boolean;
         IsTimeEntryLine: Boolean;
         LineStyle: Text;
         StatusStyle: Text;
         EntriesUpdatedMsg: Label '%1 time entries updated.', Comment = '%1 = number of time entries';
+        EntriesInReviewMsg: Label '%1 time entries were not changed because they are waiting for a customer answer.', Comment = '%1 = number of time entries';
+        ReviewsCreatedMsg: Label '%1 customer reviews created, %2 e-mails sent.', Comment = '%1 = number of reviews, %2 = number of e-mails';
 
     local procedure RefreshOverview()
     var
@@ -391,9 +432,11 @@ page 50102 "BCJ Jira Billing Overview"
             TimeEntry.SetFilter("Project No.", ProjectFilter);
         case StatusView of
             StatusView::Unbilled:
-                TimeEntry.SetFilter("Billing Status", '%1|%2', TimeEntry."Billing Status"::Open, TimeEntry."Billing Status"::Billable);
+                TimeEntry.SetFilter("Billing Status", '%1|%2|%3', TimeEntry."Billing Status"::Open, TimeEntry."Billing Status"::"Sent for Review", TimeEntry."Billing Status"::Billable);
             StatusView::Open:
                 TimeEntry.SetRange("Billing Status", TimeEntry."Billing Status"::Open);
+            StatusView::"Sent for Review":
+                TimeEntry.SetRange("Billing Status", TimeEntry."Billing Status"::"Sent for Review");
             StatusView::Billable:
                 TimeEntry.SetRange("Billing Status", TimeEntry."Billing Status"::Billable);
             StatusView::"Not Billable":
@@ -407,8 +450,10 @@ page 50102 "BCJ Jira Billing Overview"
     var
         SelectedLine: Record "BCJ Billing Overview Buffer" temporary;
         TimeEntry: Record "BCJ Project Time Entry";
+        BillingMgt: Codeunit "BCJ Billing Mgt.";
         ChangedCount: Integer;
         BilledCount: Integer;
+        InReviewCount: Integer;
     begin
         SelectedLine.Copy(Rec, true);
         CurrPage.SetSelectionFilter(SelectedLine);
@@ -428,8 +473,34 @@ page 50102 "BCJ Jira Billing Overview"
             repeat
                 SetTimeEntryFilters(TimeEntry);
                 ChangedCount += BillingOverviewMgt.SetStatusForLine(SelectedLine, TimeEntry, NewStatus);
+                SetTimeEntryFilters(TimeEntry);
+                BillingOverviewMgt.ApplyLineFilter(SelectedLine, TimeEntry);
+                InReviewCount += BillingMgt.CountEntriesInReview(TimeEntry);
             until SelectedLine.Next() = 0;
         RefreshOverview();
-        Message(EntriesUpdatedMsg, ChangedCount);
+        if InReviewCount > 0 then
+            Message(EntriesUpdatedMsg + ' ' + EntriesInReviewMsg, ChangedCount, InReviewCount)
+        else
+            Message(EntriesUpdatedMsg, ChangedCount);
+    end;
+
+    local procedure SendSelectionForReview()
+    var
+        SelectedLine: Record "BCJ Billing Overview Buffer" temporary;
+        TimeEntryFilter: Record "BCJ Project Time Entry";
+        MarkedEntry: Record "BCJ Project Time Entry";
+        TempReview: Record "BCJ Customer Review" temporary;
+        CustomerReviewMgt: Codeunit "BCJ Customer Review Mgt.";
+        ReviewCount: Integer;
+        SentCount: Integer;
+    begin
+        SelectedLine.Copy(Rec, true);
+        CurrPage.SetSelectionFilter(SelectedLine);
+        SetTimeEntryFilters(TimeEntryFilter);
+        BillingOverviewMgt.MarkEntriesForLines(SelectedLine, TimeEntryFilter, MarkedEntry);
+        ReviewCount := CustomerReviewMgt.CreateReviews(MarkedEntry, TempReview);
+        SentCount := CustomerReviewMgt.SendReviews(TempReview);
+        RefreshOverview();
+        Message(ReviewsCreatedMsg, ReviewCount, SentCount);
     end;
 }

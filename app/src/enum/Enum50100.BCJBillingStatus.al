@@ -19,4 +19,8 @@ enum 50100 "BCJ Billing Status"
     {
         Caption = 'Billed';
     }
+    value(4; "Sent for Review")
+    {
+        Caption = 'Sent for Review';
+    }
 }

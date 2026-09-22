@@ -12,5 +12,7 @@ codeunit 50106 "BCJ Install"
         BillingMgt.SyncStatusFromLegacyFlags();
         if not UpgradeTag.HasUpgradeTag(BCJUpgrade.GetBillingStatusUpgradeTag()) then
             UpgradeTag.SetUpgradeTag(BCJUpgrade.GetBillingStatusUpgradeTag());
+        if not UpgradeTag.HasUpgradeTag(BCJUpgrade.GetBillableHoursUpgradeTag()) then
+            UpgradeTag.SetUpgradeTag(BCJUpgrade.GetBillableHoursUpgradeTag());
     end;
 }
