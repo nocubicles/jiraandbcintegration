@@ -67,7 +67,7 @@ codeunit 50100 "BCJ Process Jira Queue"
     //             end;
     //     end;
     // end;
-    procedure SyncJobTimeEntry(TimeEntryId: Text; JiraIssueId: Code[20]; ResourceName: Text; PostingDate: Text; TimeSpentSeconds: Text; Comment: text): Boolean var
+    procedure SyncJobTimeEntry(TimeEntryId: Text; JiraIssueId: Text; ResourceName: Text; PostingDate: Text; TimeSpentSeconds: Text; Comment: Text): Boolean var
         ProjectTimeEntry: Record "BCJ Project Time Entry";
         JobTask: Record "Job Task";
         PostingDateTime: DateTime;
@@ -84,7 +84,7 @@ codeunit 50100 "BCJ Process Jira Queue"
                 if Evaluate(TimeSpentSecondsInt, TimeSpentSeconds)then ProjectTimeEntry.Validate("Time Spend Seconds", TimeSpentSecondsInt);
                 ProjectTimeEntry.Validate("Time Spent in Hours", TimeSpentSecondsInt / 3600);
                 ProjectTimeEntry.Validate("BC Resource No.", SyncAndGetResourceCode(ResourceName));
-                ProjectTimeEntry.Validate(Comment, Comment);
+                ProjectTimeEntry.Validate(Comment, CopyStr(Comment, 1, MaxStrLen(ProjectTimeEntry.Comment)));
                 exit(ProjectTimeEntry.Modify(true));
             end
             else
@@ -101,7 +101,7 @@ codeunit 50100 "BCJ Process Jira Queue"
                 if Evaluate(TimeSpentSecondsInt, TimeSpentSeconds)then ProjectTimeEntry.Validate("Time Spend Seconds", TimeSpentSecondsInt);
                 ProjectTimeEntry.Validate("Time Spent in Hours", TimeSpentSecondsInt / 3600);
                 ProjectTimeEntry.Validate("BC Resource No.", SyncAndGetResourceCode(ResourceName));
-                ProjectTimeEntry.Validate(Comment, Comment);
+                ProjectTimeEntry.Validate(Comment, CopyStr(Comment, 1, MaxStrLen(ProjectTimeEntry.Comment)));
                 exit(ProjectTimeEntry.Insert(true));
             end;
         end;
@@ -116,7 +116,7 @@ codeunit 50100 "BCJ Process Jira Queue"
             if not Resource.Get(ResourceNo)then begin
                 Resource.Init();
                 Resource.Validate("No.", ResourceNo);
-                Resource.Validate(Name, ResourceName);
+                Resource.Validate(Name, CopyStr(ResourceName, 1, MaxStrLen(Resource.Name)));
                 Resource.Validate(Type, Resource.Type::Person);
                 if ProjectSetup."BCJ Default Unit Of Measure" <> '' then Resource.Validate("Base Unit of Measure", ProjectSetup."BCJ Default Unit Of Measure");
                 if Resource.Insert(true)then exit(Resource."No.");
@@ -132,7 +132,7 @@ codeunit 50100 "BCJ Process Jira Queue"
             JobTask.Init();
             JobTask.Validate("Job No.", JobNo);
             JobTask."Job Task No.":=JobTaskNo;
-            jobtask.Validate("BCJ Jira Task Id", IssueId);
+            JobTask.Validate("BCJ Jira Task Id", CopyStr(IssueId, 1, MaxStrLen(JobTask."BCJ Jira Task Id")));
             JobTask.Validate(Description, CopyStr(JobTaskDescription, 1, MaxStrLen(JobTask.Description)));
             JobTask.Validate("BCJ Jira Status", Status);
             if Job.Get(JobNo)then JobTask."Job Posting Group":=Job."Job Posting Group";
@@ -140,7 +140,7 @@ codeunit 50100 "BCJ Process Jira Queue"
         end;
         if JobTask.Get(JobNo, JobTaskNo)then begin
             JobTask.Validate(Description, CopyStr(JobTaskDescription, 1, MaxStrLen(JobTask.Description)));
-            jobtask.Validate("BCJ Jira Task Id", IssueId);
+            JobTask.Validate("BCJ Jira Task Id", CopyStr(IssueId, 1, MaxStrLen(JobTask."BCJ Jira Task Id")));
             JobTask.Validate("BCJ Jira Status", Status);
             exit(JobTask.Modify(false));
         end;

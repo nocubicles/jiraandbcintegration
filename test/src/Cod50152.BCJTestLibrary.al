@@ -62,6 +62,30 @@ codeunit 50152 "BCJ Test Library"
         JobTask.Modify(false);
     end;
 
+    procedure SetJobTaskJiraId(JobNo: Code[20]; JobTaskNo: Code[20]; JiraTaskId: Text[50])
+    var
+        JobTask: Record "Job Task";
+    begin
+        // CreateJobTask does not set the Jira issue id - the worklog sync looks the task up by it,
+        // so tests that exercise worklogs have to link the two explicitly.
+        JobTask.Get(JobNo, JobTaskNo);
+        JobTask."BCJ Jira Task Id" := JiraTaskId;
+        JobTask.Modify(false);
+    end;
+
+    procedure EnsureJobsSetup()
+    var
+        JobsSetup: Record "Jobs Setup";
+    begin
+        // The worklog sync reads the Projects setup singleton. A sandbox or a fresh CRONUS may or
+        // may not have it, so create it when missing and leave an existing one untouched - its
+        // default unit of measure is real configuration a test has no business changing.
+        if JobsSetup.Get() then
+            exit;
+        JobsSetup.Init();
+        JobsSetup.Insert(false);
+    end;
+
     procedure CreateTimeEntry(var TimeEntry: Record "BCJ Project Time Entry"; JiraId: Text[50]; JobNo: Code[20]; JobTaskNo: Code[20]; ResourceNo: Code[20]; PostingDate: Date; Hours: Decimal; Status: Enum "BCJ Billing Status")
     begin
         TimeEntry.Init();
