@@ -451,6 +451,7 @@ page 50102 "BCJ Jira Billing Overview"
         SelectedLine: Record "BCJ Billing Overview Buffer" temporary;
         TimeEntry: Record "BCJ Project Time Entry";
         MarkedEntry: Record "BCJ Project Time Entry";
+        BillingMgt: Codeunit "BCJ Billing Mgt.";
         ChangedCount: Integer;
         BilledCount: Integer;
         InReviewCount: Integer;
@@ -474,11 +475,18 @@ page 50102 "BCJ Jira Billing Overview"
                 SetTimeEntryFilters(TimeEntry);
                 ChangedCount += BillingOverviewMgt.SetStatusForLine(SelectedLine, TimeEntry, NewStatus);
             until SelectedLine.Next() = 0;
-        // Count the skipped entries over the de-duplicated selection, so overlapping rows are not counted twice.
+        // Count the skipped entries. A single selected row needs one Count; several rows may overlap
+        // (a customer row plus one of its tasks), so those are de-duplicated through marks.
         SetTimeEntryFilters(TimeEntry);
-        BillingOverviewMgt.MarkEntriesForLines(SelectedLine, TimeEntry, MarkedEntry);
-        MarkedEntry.SetRange("Billing Status", MarkedEntry."Billing Status"::"Sent for Review");
-        InReviewCount := MarkedEntry.Count();
+        if SelectedLine.Count() = 1 then begin
+            SelectedLine.FindFirst();
+            BillingOverviewMgt.ApplyLineFilter(SelectedLine, TimeEntry);
+            InReviewCount := BillingMgt.CountEntriesInReview(TimeEntry);
+        end else begin
+            BillingOverviewMgt.MarkEntriesForLines(SelectedLine, TimeEntry, MarkedEntry);
+            MarkedEntry.SetRange("Billing Status", MarkedEntry."Billing Status"::"Sent for Review");
+            InReviewCount := MarkedEntry.Count();
+        end;
         RefreshOverview();
         if InReviewCount > 0 then
             Message(EntriesUpdatedMsg + ' ' + EntriesInReviewMsg, ChangedCount, InReviewCount)
