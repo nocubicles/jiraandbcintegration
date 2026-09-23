@@ -121,8 +121,7 @@ function layout(title, body) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(title)}</title>
 <style>
-  :root { color-scheme: light dark; --fg: #1a1a1a; --bg: #fff; --muted: #666; --line: #ddd; --accent: #0b5cad; --ok: #1a7f37; --warn: #b54708; }
-  @media (prefers-color-scheme: dark) { :root { --fg: #eee; --bg: #161616; --muted: #aaa; --line: #333; --accent: #6cb2ff; --ok: #4ade80; --warn: #fbbf24; } }
+  :root { color-scheme: light; --fg: #1a1a1a; --bg: #fff; --muted: #666; --line: #ddd; --accent: #0b5cad; --ok: #1a7f37; --warn: #b54708; }
   body { margin: 0; font: 16px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: var(--fg); background: var(--bg); }
   main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
   h1 { font-size: 1.4rem; margin: 0 0 4px; }
