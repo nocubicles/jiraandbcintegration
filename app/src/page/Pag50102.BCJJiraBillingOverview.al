@@ -253,7 +253,7 @@ page 50102 "BCJ Jira Billing Overview"
             {
                 Caption = 'Send for Customer Review';
                 Image = SendApprovalRequest;
-                ToolTip = 'Create a customer review per project from the open time entries under the selected lines and e-mail it to the bill-to contact of the project. The entries wait as Sent for Review until the customer answers. Only entries within the current filters are included.';
+                ToolTip = 'Create a customer review per project from the open time entries under the selected lines and open it, so you can set the hours to bill before e-mailing it or sharing its link. The entries wait as Sent for Review until the customer answers. Only entries within the current filters are included.';
 
                 trigger OnAction()
                 begin
@@ -415,7 +415,6 @@ page 50102 "BCJ Jira Billing Overview"
         StatusStyle: Text;
         EntriesUpdatedMsg: Label '%1 time entries updated.', Comment = '%1 = number of time entries';
         EntriesInReviewMsg: Label '%1 time entries were not changed because they are waiting for a customer answer.', Comment = '%1 = number of time entries';
-        ReviewsCreatedMsg: Label '%1 customer reviews created, %2 e-mails sent.', Comment = '%1 = number of reviews, %2 = number of e-mails';
         NoOpenReviewMsg: Label 'There is no customer review waiting for an answer under this line.';
 
     local procedure RefreshOverview()
@@ -521,23 +520,22 @@ page 50102 "BCJ Jira Billing Overview"
         MarkedEntry: Record "BCJ Project Time Entry";
         TempReview: Record "BCJ Customer Review" temporary;
         CustomerReviewMgt: Codeunit "BCJ Customer Review Mgt.";
-        ReviewCount: Integer;
-        SentCount: Integer;
     begin
         SelectedLine.Copy(Rec, true);
         CurrPage.SetSelectionFilter(SelectedLine);
         SetTimeEntryFilters(TimeEntryFilter);
         BillingOverviewMgt.MarkEntriesForLines(SelectedLine, TimeEntryFilter, MarkedEntry);
-        ReviewCount := CustomerReviewMgt.CreateReviews(MarkedEntry, TempReview);
-        SentCount := CustomerReviewMgt.SendReviews(TempReview);
+        CustomerReviewMgt.CreateReviews(MarkedEntry, TempReview);
+        // Nothing is e-mailed here: the user sets the hours to bill on the review, then sends it from the card.
+        // The reviews must be committed before the card opens modally.
+        Commit();
+        OpenReviews(TempReview);
         RefreshOverview();
-        Message(ReviewsCreatedMsg, ReviewCount, SentCount);
     end;
 
     local procedure OpenReviewsForLine()
     var
         TimeEntry: Record "BCJ Project Time Entry";
-        Review: Record "BCJ Customer Review";
         TempReview: Record "BCJ Customer Review" temporary;
         CustomerReviewMgt: Codeunit "BCJ Customer Review Mgt.";
     begin
@@ -545,28 +543,31 @@ page 50102 "BCJ Jira Billing Overview"
         SetTimeEntryFilters(TimeEntry);
         BillingOverviewMgt.ApplyLineFilter(Rec, TimeEntry);
         TimeEntry.SetRange("Billing Status", TimeEntry."Billing Status"::"Sent for Review");
-        case CustomerReviewMgt.GetOpenReviews(TimeEntry, TempReview) of
-            0:
-                begin
-                    Message(NoOpenReviewMsg);
-                    exit;
-                end;
-            1:
-                begin
-                    TempReview.FindFirst();
-                    Review.SetRange("Review No.", TempReview."Review No.");
-                    Page.RunModal(Page::"BCJ Customer Review", Review);
-                end;
-            else begin
-                TempReview.FindSet();
-                repeat
-                    if Review.Get(TempReview."Review No.") then
-                        Review.Mark(true);
-                until TempReview.Next() = 0;
-                Review.MarkedOnly(true);
-                Page.RunModal(Page::"BCJ Customer Reviews", Review);
-            end;
+        if CustomerReviewMgt.GetOpenReviews(TimeEntry, TempReview) = 0 then begin
+            Message(NoOpenReviewMsg);
+            exit;
         end;
+        OpenReviews(TempReview);
         RefreshOverview();
+    end;
+
+    /// Opens the card when there is one review, otherwise the list limited to these reviews.
+    local procedure OpenReviews(var TempReview: Record "BCJ Customer Review" temporary)
+    var
+        Review: Record "BCJ Customer Review";
+    begin
+        if TempReview.Count() = 1 then begin
+            TempReview.FindFirst();
+            Review.SetRange("Review No.", TempReview."Review No.");
+            Page.RunModal(Page::"BCJ Customer Review", Review);
+            exit;
+        end;
+        if TempReview.FindSet() then
+            repeat
+                if Review.Get(TempReview."Review No.") then
+                    Review.Mark(true);
+            until TempReview.Next() = 0;
+        Review.MarkedOnly(true);
+        Page.RunModal(Page::"BCJ Customer Reviews", Review);
     end;
 }

@@ -42,6 +42,26 @@ page 50108 "BCJ Cust. Review Line API"
                 {
                     Editable = false;
                 }
+                field(taskLoggedHours; Rec."Task Logged Hours")
+                {
+                    Editable = false;
+                }
+                field(taskBilledHours; Rec."Task Billed Hours")
+                {
+                    Editable = false;
+                }
+                field(taskNotBillableHours; Rec."Task Not Billable Hours")
+                {
+                    Editable = false;
+                }
+                field(taskNotBilledHours; Rec."Task Not Billed Hours")
+                {
+                    Editable = false;
+                }
+                field(hoursToBill; Rec."Hours to Bill")
+                {
+                    Editable = false;
+                }
                 field(approvedHours; Rec."Approved Hours")
                 {
                 }

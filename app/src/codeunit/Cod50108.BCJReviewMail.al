@@ -2,10 +2,15 @@ codeunit 50108 "BCJ Review Mail"
 {
     var
         SubjectLbl: Label 'Please review the hours logged on project %1 %2', Comment = '%1 = project no., %2 = project description';
-        IntroLbl: Label 'Below are the hours we logged on your project %1. Please open the review link, confirm the hours you approve for each task, and submit your answer.', Comment = '%1 = project description or no.';
+        IntroLbl: Label 'We ask you to approve %1 hours on your project %2, shown per task in the To approve column below. Please open the review link, confirm the hours you approve for each task, and submit your answer.', Comment = '%1 = total hours to approve, %2 = project description or no.';
+        HistoryNoteLbl: Label 'Logged: all hours logged on the task. Billed: invoiced or approved earlier. Not billable: written off earlier. Not billed: not invoiced yet. To approve: the hours we ask you to approve now.';
         TaskHdrLbl: Label 'Task';
         DescriptionHdrLbl: Label 'Description';
-        HoursHdrLbl: Label 'Hours';
+        LoggedHdrLbl: Label 'Logged';
+        BilledHdrLbl: Label 'Billed';
+        NotBillableHdrLbl: Label 'Not billable';
+        NotBilledHdrLbl: Label 'Not billed';
+        ToApproveHdrLbl: Label 'To approve';
         TotalLbl: Label 'Total';
         OpenReviewLbl: Label 'Open the review';
         LinkHintLbl: Label 'If the button does not work, copy this address into your browser: %1', Comment = '%1 = review link';
@@ -65,7 +70,8 @@ codeunit 50108 "BCJ Review Mail"
     end;
 
     /// <summary>
-    /// Builds the review e-mail message without sending it: one row per task with the logged hours, a total, and the review link.
+    /// Builds the review e-mail message without sending it: one row per task with the task's history (logged, billed,
+    /// not billable, not billed) and the hours to approve, a total row, and the review link.
     /// </summary>
     procedure BuildReviewEmail(Review: Record "BCJ Customer Review"; Recipient: Text; var EmailMessage: Codeunit "Email Message")
     var
@@ -73,8 +79,10 @@ codeunit 50108 "BCJ Review Mail"
         ReviewLine: Record "BCJ Customer Review Line";
         Link: Text;
         Body: TextBuilder;
-        TotalHours: Decimal;
+        Totals: array[5] of Decimal;
         ProjectDescription: Text;
+        Cell: Text;
+        AskCell: Text;
     begin
         Link := GetReviewLink(Review);
         Job.SetLoadFields(Description);
@@ -83,20 +91,39 @@ codeunit 50108 "BCJ Review Mail"
         if ProjectDescription = '' then
             ProjectDescription := Review."Project No.";
 
-        Body.AppendLine('<html><body style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#222">');
-        Body.AppendLine('<p>' + Html(StrSubstNo(IntroLbl, ProjectDescription)) + '</p>');
-        Body.AppendLine('<table cellpadding="6" cellspacing="0" style="border-collapse:collapse;border:1px solid #ccc">');
-        Body.AppendLine('<tr style="background:#f2f2f2"><th align="left">' + Html(TaskHdrLbl) + '</th><th align="left">' + Html(DescriptionHdrLbl) + '</th><th align="right">' + Html(HoursHdrLbl) + '</th></tr>');
         ReviewLine.SetRange("Review No.", Review."Review No.");
+        ReviewLine.CalcSums("Task Logged Hours", "Task Billed Hours", "Task Not Billable Hours", "Task Not Billed Hours", "Hours to Bill");
+        Totals[1] := ReviewLine."Task Logged Hours";
+        Totals[2] := ReviewLine."Task Billed Hours";
+        Totals[3] := ReviewLine."Task Not Billable Hours";
+        Totals[4] := ReviewLine."Task Not Billed Hours";
+        Totals[5] := ReviewLine."Hours to Bill";
+
+        Cell := '<td align="right" style="border-top:1px solid #ddd">';
+        // The hours asked for approval are highlighted so the customer sees at once what the question is.
+        AskCell := '<td align="right" style="border-top:1px solid #ddd;background:#eef5fc;font-weight:bold">';
+        Body.AppendLine('<html><body style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#222">');
+        Body.AppendLine('<p>' + Html(StrSubstNo(IntroLbl, FormatHours(Totals[5]), ProjectDescription)) + '</p>');
+        Body.AppendLine('<table cellpadding="6" cellspacing="0" style="border-collapse:collapse;border:1px solid #ccc">');
+        Body.AppendLine('<tr style="background:#f2f2f2"><th align="left">' + Html(TaskHdrLbl) + '</th><th align="left">' + Html(DescriptionHdrLbl) +
+            '</th><th align="right">' + Html(LoggedHdrLbl) + '</th><th align="right">' + Html(BilledHdrLbl) +
+            '</th><th align="right">' + Html(NotBillableHdrLbl) + '</th><th align="right">' + Html(NotBilledHdrLbl) +
+            '</th><th align="right" style="background:#eef5fc;color:#0b5cad">' + Html(ToApproveHdrLbl) + '</th></tr>');
         if ReviewLine.FindSet() then
             repeat
-                TotalHours += ReviewLine."Logged Hours";
                 Body.AppendLine('<tr><td style="border-top:1px solid #ddd">' + Html(ReviewLine."Project Task No.") +
-                    '</td><td style="border-top:1px solid #ddd">' + Html(ReviewLine."Task Description") +
-                    '</td><td align="right" style="border-top:1px solid #ddd">' + FormatHours(ReviewLine."Logged Hours") + '</td></tr>');
+                    '</td><td style="border-top:1px solid #ddd">' + Html(ReviewLine."Task Description") + '</td>' +
+                    Cell + FormatHours(ReviewLine."Task Logged Hours") + '</td>' +
+                    Cell + FormatHours(ReviewLine."Task Billed Hours") + '</td>' +
+                    Cell + FormatHours(ReviewLine."Task Not Billable Hours") + '</td>' +
+                    Cell + FormatHours(ReviewLine."Task Not Billed Hours") + '</td>' +
+                    AskCell + FormatHours(ReviewLine."Hours to Bill") + '</td></tr>');
             until ReviewLine.Next() = 0;
-        Body.AppendLine('<tr><td colspan="2" style="border-top:2px solid #999"><b>' + Html(TotalLbl) + '</b></td><td align="right" style="border-top:2px solid #999"><b>' + FormatHours(TotalHours) + '</b></td></tr>');
+        Body.AppendLine('<tr><td colspan="2" style="border-top:2px solid #999"><b>' + Html(TotalLbl) + '</b></td>' +
+            TotalCell(Totals[1], false) + TotalCell(Totals[2], false) + TotalCell(Totals[3], false) + TotalCell(Totals[4], false) +
+            TotalCell(Totals[5], true) + '</tr>');
         Body.AppendLine('</table>');
+        Body.AppendLine('<p style="color:#666;font-size:12px">' + Html(HistoryNoteLbl) + '</p>');
         Body.AppendLine('<p style="margin:24px 0"><a href="' + Html(Link) + '" style="background:#0b5cad;color:#fff;padding:10px 18px;text-decoration:none;border-radius:6px">' + Html(OpenReviewLbl) + '</a></p>');
         Body.AppendLine('<p style="color:#666;font-size:12px">' + Html(StrSubstNo(LinkHintLbl, Link)) + '</p>');
         Body.AppendLine('</body></html>');
@@ -137,6 +164,13 @@ codeunit 50108 "BCJ Review Mail"
     local procedure TryBuildReviewEmail(Review: Record "BCJ Customer Review"; Recipient: Text; var EmailMessage: Codeunit "Email Message")
     begin
         BuildReviewEmail(Review, Recipient, EmailMessage);
+    end;
+
+    local procedure TotalCell(Hours: Decimal; Highlight: Boolean): Text
+    begin
+        if Highlight then
+            exit('<td align="right" style="border-top:2px solid #999;background:#eef5fc"><b>' + FormatHours(Hours) + '</b></td>');
+        exit('<td align="right" style="border-top:2px solid #999"><b>' + FormatHours(Hours) + '</b></td>');
     end;
 
     local procedure FormatHours(Hours: Decimal): Text

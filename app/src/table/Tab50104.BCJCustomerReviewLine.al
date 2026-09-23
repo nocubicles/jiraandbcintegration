@@ -35,8 +35,8 @@ table 50104 "BCJ Customer Review Line"
 
             trigger OnValidate()
             begin
-                if ("Approved Hours" < 0) or ("Approved Hours" > "Logged Hours") then
-                    Error(ApprovedHoursOutOfRangeErr, "Logged Hours");
+                if ("Approved Hours" < 0) or ("Approved Hours" > "Hours to Bill") then
+                    Error(ApprovedHoursOutOfRangeErr, "Hours to Bill");
             end;
         }
         field(6; "Customer Comment"; Text[250])
@@ -52,6 +52,45 @@ table 50104 "BCJ Customer Review Line"
         field(8; "Entry Count"; Integer)
         {
             Caption = 'Entry Count';
+            Editable = false;
+        }
+        field(9; "Hours to Bill"; Decimal)
+        {
+            Caption = 'Hours to Bill';
+            DecimalPlaces = 0 : 2;
+            MinValue = 0;
+
+            trigger OnValidate()
+            begin
+                if ("Hours to Bill" < 0) or ("Hours to Bill" > "Logged Hours") then
+                    Error(HoursToBillOutOfRangeErr, "Logged Hours");
+                // The customer can never have approved more than is asked.
+                if "Approved Hours" > "Hours to Bill" then
+                    "Approved Hours" := "Hours to Bill";
+            end;
+        }
+        field(10; "Task Logged Hours"; Decimal)
+        {
+            Caption = 'Task Logged Hours';
+            DecimalPlaces = 0 : 2;
+            Editable = false;
+        }
+        field(11; "Task Billed Hours"; Decimal)
+        {
+            Caption = 'Task Billed Hours';
+            DecimalPlaces = 0 : 2;
+            Editable = false;
+        }
+        field(12; "Task Not Billable Hours"; Decimal)
+        {
+            Caption = 'Task Not Billable Hours';
+            DecimalPlaces = 0 : 2;
+            Editable = false;
+        }
+        field(13; "Task Not Billed Hours"; Decimal)
+        {
+            Caption = 'Task Not Billed Hours';
+            DecimalPlaces = 0 : 2;
             Editable = false;
         }
     }
@@ -73,5 +112,6 @@ table 50104 "BCJ Customer Review Line"
     end;
 
     var
-        ApprovedHoursOutOfRangeErr: Label 'The approved hours must be between 0 and %1.', Comment = '%1 = logged hours on the line';
+        ApprovedHoursOutOfRangeErr: Label 'The approved hours must be between 0 and %1.', Comment = '%1 = hours to bill on the line';
+        HoursToBillOutOfRangeErr: Label 'The hours to bill must be between 0 and %1, the hours logged in this review.', Comment = '%1 = logged hours on the line';
 }

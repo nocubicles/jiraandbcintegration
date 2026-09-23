@@ -123,16 +123,22 @@ function layout(title, body) {
 <style>
   :root { color-scheme: light; --fg: #1a1a1a; --bg: #fff; --muted: #666; --line: #ddd; --accent: #0b5cad; --ok: #1a7f37; --warn: #b54708; }
   body { margin: 0; font: 16px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: var(--fg); background: var(--bg); }
-  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+  .scroll { overflow-x: auto; }
   h1 { font-size: 1.4rem; margin: 0 0 4px; }
   .muted { color: var(--muted); }
-  table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+  table { width: 100%; border-collapse: collapse; margin: 20px 0; min-width: 720px; }
   th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
   th { font-weight: 600; font-size: 0.85rem; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
   td.num, th.num { text-align: right; white-space: nowrap; }
   input[type=number] { width: 6.5em; padding: 6px 8px; font: inherit; text-align: right; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); }
   input[type=text] { width: 100%; box-sizing: border-box; padding: 6px 8px; font: inherit; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); }
   .task { font-weight: 600; }
+  th.ask, td.ask { background: #eef5fc; font-weight: 700; border-left: 2px solid var(--accent); border-right: 2px solid var(--accent); }
+  th.ask { color: var(--accent); }
+  .legend { font-size: 0.9rem; }
+  .legend dt { font-weight: 600; display: inline; }
+  .legend dd { display: inline; margin: 0 12px 0 4px; }
   .desc { font-size: 0.95rem; }
   tfoot td { font-weight: 600; border-bottom: none; }
   .actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
@@ -147,12 +153,32 @@ function layout(title, body) {
 </html>`;
 }
 
+// Columns that describe the task's whole history, as captured when the review was created.
+const HISTORY = [
+  ['taskLoggedHours', 'Logged'],
+  ['taskBilledHours', 'Billed'],
+  ['taskNotBillableHours', 'Not billable'],
+  ['taskNotBilledHours', 'Not billed'],
+];
+const requestedOf = l => round2(Number(l.hoursToBill || 0));
+const sumOf = (lines, k) => lines.reduce((s, l) => s + Number(l[k] || 0), 0);
+const historyCells = l => HISTORY.map(([k]) => `<td class="num">${hours(l[k])}</td>`).join('');
+const historyHeads = HISTORY.map(([, t]) => `<th class="num">${t}</th>`).join('');
+const historyTotals = lines => HISTORY.map(([k]) => `<td class="num">${hours(sumOf(lines, k))}</td>`).join('');
+const LEGEND = `<dl class="legend muted">
+    <dt>Logged</dt><dd>all hours logged on the task</dd>
+    <dt>Billed</dt><dd>invoiced or approved earlier</dd>
+    <dt>Not billable</dt><dd>written off earlier, not charged</dd>
+    <dt>Not billed</dt><dd>not invoiced yet</dd>
+    <dt>To approve</dt><dd>the hours we ask you to approve now</dd>
+  </dl>`;
+
 // `values` optionally overrides what the inputs show (used to keep the customer's typed input after a validation error).
 function reviewPage(review, lines, message, values) {
   const prefillStored = values ? true : hasStoredAnswer(lines);
   const approvedOf = l => {
     if (values && values[l.systemId]) return values[l.systemId].approved;
-    return prefillStored ? Number(l.approvedHours) : Number(l.loggedHours);
+    return prefillStored ? Number(l.approvedHours) : requestedOf(l);
   };
   const commentOf = l => (values && values[l.systemId]) ? values[l.systemId].comment : (l.customerComment || '');
   const rows = lines.map(l => `
@@ -160,30 +186,33 @@ function reviewPage(review, lines, message, values) {
       <td><div class="task">${esc(l.taskNo)}</div><div class="desc">${esc(l.taskDescription)}</div>
           <input type="text" name="comment_${esc(l.systemId)}" placeholder="Comment (optional)" maxlength="250" value="${esc(commentOf(l))}" style="margin-top:6px">
           <input type="hidden" name="etag_${esc(l.systemId)}" value="${esc(l['@odata.etag'] || '')}"></td>
-      <td class="num">${hours(l.loggedHours)}</td>
-      <td class="num"><input type="number" name="approved_${esc(l.systemId)}" min="0" max="${round2(Number(l.loggedHours))}" step="0.01"
-          value="${esc(approvedOf(l))}" data-logged="${round2(Number(l.loggedHours))}" required></td>
+      ${historyCells(l)}
+      <td class="num ask">${hours(requestedOf(l))}</td>
+      <td class="num"><input type="number" name="approved_${esc(l.systemId)}" min="0" max="${requestedOf(l)}" step="0.01"
+          value="${esc(approvedOf(l))}" data-requested="${requestedOf(l)}" required aria-label="Hours you approve for ${esc(l.taskNo)}"></td>
     </tr>`).join('');
-  const totalLogged = lines.reduce((s, l) => s + Number(l.loggedHours || 0), 0);
+  const totalRequested = lines.reduce((s, l) => s + requestedOf(l), 0);
   const totalApproved = lines.reduce((s, l) => s + (Number(approvedOf(l)) || 0), 0);
   const reopenedNotice = (!values && prefillStored)
     ? '<div class="notice">This review was reopened. Your previous answer is filled in below; adjust it and submit again.</div>' : '';
   return layout(`${cfg.brand}: ${review.projectNo}`, `
     <h1>${esc(cfg.brand)}</h1>
     <p class="muted">${esc(review.customerName)} &middot; ${esc(review.projectDescription || review.projectNo)} &middot; review #${esc(review.reviewNo)}</p>
-    <p>Below are the hours logged on your project that we would like to invoice. For each task, confirm the hours you approve.
-       Reduce the number if you agree to only part of the hours, or set it to 0 if the task should not be billed. Comments are optional.</p>
+    <div class="notice">We ask you to approve <strong>${hours(totalRequested)} hours</strong> for this project, shown per task in the
+       highlighted <strong>To approve</strong> column. Confirm them in <strong>Your approval</strong>: keep the number to approve it,
+       lower it to approve part of it, or set 0. The other columns show the task's history for reference.</div>
     ${reopenedNotice}
     ${message ? `<div class="notice warn">${esc(message)}</div>` : ''}
     <form method="post" action="/review/${esc(review.accessToken)}">
-      <table>
-        <thead><tr><th>Task</th><th class="num">Logged</th><th class="num">Approved</th></tr></thead>
+      <div class="scroll"><table>
+        <thead><tr><th>Task</th>${historyHeads}<th class="num ask">To approve</th><th class="num">Your approval</th></tr></thead>
         <tbody>${rows}</tbody>
-        <tfoot><tr><td>Total hours</td><td class="num">${hours(totalLogged)}</td><td class="num" id="total-approved">${hours(totalApproved)}</td></tr></tfoot>
-      </table>
+        <tfoot><tr><td>Total hours</td>${historyTotals(lines)}<td class="num ask">${hours(totalRequested)}</td><td class="num" id="total-approved">${hours(totalApproved)}</td></tr></tfoot>
+      </table></div>
+      ${LEGEND}
       <div class="actions">
         <button type="submit">Submit answer</button>
-        <button type="button" class="secondary" id="approve-all">Approve all hours</button>
+        <button type="button" class="secondary" id="approve-all">Approve all requested hours</button>
         <button type="button" class="secondary" id="reject-all">Set all to 0</button>
       </div>
     </form>
@@ -193,7 +222,7 @@ function reviewPage(review, lines, message, values) {
       const fmt = n => n.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
       const recalc = () => total.textContent = fmt(inputs.reduce((s, i) => s + (Number(i.value) || 0), 0));
       inputs.forEach(i => i.addEventListener('input', recalc));
-      document.getElementById('approve-all').onclick = () => { inputs.forEach(i => i.value = i.dataset.logged); recalc(); };
+      document.getElementById('approve-all').onclick = () => { inputs.forEach(i => i.value = i.dataset.requested); recalc(); };
       document.getElementById('reject-all').onclick = () => { inputs.forEach(i => i.value = 0); recalc(); };
     </script>`);
 }
@@ -204,18 +233,18 @@ function messagePage(title, text, kind) {
 
 function answeredPage(review, lines) {
   const rows = lines.map(l => `<tr><td><div class="task">${esc(l.taskNo)}</div><div class="desc">${esc(l.taskDescription)}</div>${l.customerComment ? `<div class="desc muted">${esc(l.customerComment)}</div>` : ''}</td>
-    <td class="num">${hours(l.loggedHours)}</td><td class="num">${hours(l.approvedHours)}</td></tr>`).join('');
-  const sum = k => lines.reduce((s, l) => s + Number(l[k] || 0), 0);
+    ${historyCells(l)}<td class="num ask">${hours(requestedOf(l))}</td><td class="num">${hours(l.approvedHours)}</td></tr>`).join('');
   const answeredOn = review.answeredOn && !review.answeredOn.startsWith('0001-') ? new Date(review.answeredOn).toLocaleDateString('en-GB') : '';
   return layout(`${cfg.brand}: ${review.projectNo}`, `
     <h1>${esc(cfg.brand)}</h1>
     <p class="muted">${esc(review.customerName)} &middot; ${esc(review.projectDescription || review.projectNo)} &middot; review #${esc(review.reviewNo)}</p>
     <div class="notice ok">Thank you, your answer has been recorded${answeredOn ? ` on ${esc(answeredOn)}` : ''}.</div>
-    <table>
-      <thead><tr><th>Task</th><th class="num">Logged</th><th class="num">Approved</th></tr></thead>
+    <div class="scroll"><table>
+      <thead><tr><th>Task</th>${historyHeads}<th class="num ask">To approve</th><th class="num">You approved</th></tr></thead>
       <tbody>${rows}</tbody>
-      <tfoot><tr><td>Total hours</td><td class="num">${hours(sum('loggedHours'))}</td><td class="num">${hours(sum('approvedHours'))}</td></tr></tfoot>
-    </table>`);
+      <tfoot><tr><td>Total hours</td>${historyTotals(lines)}<td class="num ask">${hours(lines.reduce((s, l) => s + requestedOf(l), 0))}</td><td class="num">${hours(sumOf(lines, 'approvedHours'))}</td></tr></tfoot>
+    </table></div>
+    ${LEGEND}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -263,14 +292,14 @@ async function handlePost(req, res, token) {
     const comment = (form.get(`comment_${line.systemId}`) || '').slice(0, 250);
     const etag = form.get(`etag_${line.systemId}`) || '*';
     values[line.systemId] = { approved: raw ?? '', comment };
-    const logged = round2(Number(line.loggedHours));
+    const requested = requestedOf(line);
     const approved = Number(String(raw ?? '').replace(',', '.'));
-    if (raw === null || raw === '' || !Number.isFinite(approved) || approved < 0 || round2(approved) > logged) {
-      problem = problem || `Approved hours for ${line.taskNo} must be between 0 and ${hours(logged)}.`;
+    if (raw === null || raw === '' || !Number.isFinite(approved) || approved < 0 || round2(approved) > requested) {
+      problem = problem || `Approved hours for ${line.taskNo} must be between 0 and ${hours(requested)}.`;
       continue;
     }
-    // Round to what BC stores and never exceed the logged hours after rounding.
-    updates.push({ line, approved: Math.min(round2(approved), logged), comment, etag });
+    // Round to what BC stores and never exceed the requested hours after rounding.
+    updates.push({ line, approved: Math.min(round2(approved), requested), comment, etag });
   }
   if (problem) return send(res, 400, reviewPage(review, lines, problem, values));
 

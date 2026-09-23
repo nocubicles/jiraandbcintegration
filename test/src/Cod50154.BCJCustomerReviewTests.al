@@ -1644,6 +1644,518 @@ codeunit 50154 "BCJ Customer Review Tests"
     end;
 
     // ---------------------------------------------------------------------------------
+    // Hours to Bill - what the consultant asks the customer to approve
+    // ---------------------------------------------------------------------------------
+
+    [Test]
+    procedure CreateReviews_HoursToBillDefaultsToLoggedHours()
+    var
+        Review: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] Until the consultant decides otherwise, the customer is asked to approve
+        // everything that was sent - asking for less by default would silently give hours away,
+        // asking for more would invent them. The default must be the line's Logged Hours after
+        // its 0.01 rounding, not the raw sum of the entries: the customer sees two decimals, and
+        // Approved Hours is capped by Hours to Bill, so a raw 0.3333 cap would let the customer
+        // approve more than the 0.33 they were shown.
+        // [GIVEN] Two tasks, one of which holds a third of an hour
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        CreateTask(JobNo, 'T2');
+        AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
+        AddEntry('E2', JobNo, 'T1', D() + 1, 1.5, "BCJ Billing Status"::Open);
+        AddEntry('E3', JobNo, 'T2', D(), 1 / 3, "BCJ Billing Status"::Open);
+        // [WHEN] The project is sent for review
+        CreateOneReview(Review);
+        // [THEN] Every line asks for exactly its logged hours
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(3.5, ReviewLine."Hours to Bill", 'A new line must ask the customer to approve all of its logged hours');
+        Assert.AreEqual(ReviewLine."Logged Hours", ReviewLine."Hours to Bill", 'A new line must ask for exactly its Logged Hours');
+        ReviewLine.Get(Review."Review No.", 'T2');
+        Assert.AreEqual(0.33, ReviewLine."Logged Hours", 'Fixture: Logged Hours must be rounded to 0.01');
+        Assert.AreEqual(0.33, ReviewLine."Hours to Bill", 'Hours to Bill must default to the rounded Logged Hours the customer is shown, not the raw entry sum');
+        // [THEN] The review header totals what is asked of the customer
+        Review.CalcFields("Hours to Bill");
+        Assert.AreEqual(3.83, Review."Hours to Bill", 'The review Hours to Bill must be the sum of its lines Hours to Bill');
+    end;
+
+    [Test]
+    procedure CreateReviews_TaskSnapshotCoversWholeTaskHistory()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        TempReview: Record "BCJ Customer Review" temporary;
+        Review: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        CustomerNo: Code[20];
+        JobNo: Code[20];
+        OtherJobNo: Code[20];
+    begin
+        // [SCENARIO] The customer judges a task by its whole history, not by this period's slice:
+        // what has been logged on it altogether, what was already charged, what was written off,
+        // and what is still undecided. So the snapshot covers every entry of the task whatever
+        // the consultant's selection was. Billed and Billable entries count only their allocated
+        // Billable Hours as billed; the rest of their time was worked and not charged, so it is
+        // Not Billable. Not Billed is what nobody has decided yet (Open + Sent for Review,
+        // including this review). Entries of another task or project are another agreement and
+        // must never leak into the numbers.
+        // [GIVEN] Task T1 with a partly billed entry (4 h, 3 billed), a billable entry (2 h),
+        // a not billable entry (1.5 h), an open entry outside the period (0.75 h) and two open
+        // entries in the period (2.5 + 1.25 h)
+        Initialize();
+        CustomerNo := CreateCustomer('C');
+        JobNo := CreateProject('P1', CustomerNo);
+        OtherJobNo := CreateProject('P2', CustomerNo);
+        CreateTask(JobNo, 'T1');
+        CreateTask(JobNo, 'T2');
+        CreateTask(OtherJobNo, 'T1');
+        AddEntry('BILLED', JobNo, 'T1', D() - 30, 4, "BCJ Billing Status"::Billed);
+        SetBillableHours('BILLED', 3);
+        AddEntry('BILLABLE', JobNo, 'T1', D() - 20, 2, "BCJ Billing Status"::Billable);
+        AddEntry('NOTBILL', JobNo, 'T1', D() - 10, 1.5, "BCJ Billing Status"::"Not Billable");
+        AddEntry('LATER', JobNo, 'T1', D() + 40, 0.75, "BCJ Billing Status"::Open);
+        AddEntry('R1', JobNo, 'T1', D(), 2.5, "BCJ Billing Status"::Open);
+        AddEntry('R2', JobNo, 'T1', D() + 1, 1.25, "BCJ Billing Status"::Open);
+        // [GIVEN] Decided hours on another task of the same project and on the same task no. of another project
+        AddEntry('OTHERTASK', JobNo, 'T2', D() - 5, 7, "BCJ Billing Status"::Billed);
+        AddEntry('OTHERPROJ', OtherJobNo, 'T1', D() - 5, 9, "BCJ Billing Status"::Billable);
+        // [WHEN] Only project P1 in the current period is sent
+        FilterOwnProjects(TimeEntry);
+        TimeEntry.SetRange("Project No.", JobNo);
+        TimeEntry.SetRange("Posting Date", D(), D() + 1);
+        Assert.AreEqual(1, CustomerReviewMgt.CreateReviews(TimeEntry, TempReview), 'Fixture: the period of project P1 must produce exactly one review');
+        TempReview.FindFirst();
+        Review.Get(TempReview."Review No.");
+        // [THEN] The line holds only this period's hours, but the snapshot holds the whole task
+        ReviewLine.SetRange("Review No.", Review."Review No.");
+        Assert.AreEqual(1, ReviewLine.Count(), 'Fixture: only task T1 had open entries in the period, so only T1 may get a line');
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(3.75, ReviewLine."Logged Hours", 'Fixture: the line must hold only the two entries inside the period');
+        Assert.AreEqual(3.75, ReviewLine."Hours to Bill", 'Hours to Bill must default to the hours sent, not to the task history');
+        AssertTaskSnapshot(ReviewLine, 12, 5, 2.5, 4.5, 'Task T1 with billed, billable, not billable, later open and reviewed entries');
+    end;
+
+    [Test]
+    procedure CreateReviews_TaskSnapshotClampsAllocationAndBalances()
+    var
+        Review: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] Billable Hours is a stored number and can be out of step with the logged time
+        // (a worklog corrected in Jira, an allocation typed by hand). The snapshot must never show
+        // more billed than was worked, nor a negative charge - so the allocation counts only within
+        // 0..logged time. And because the customer sees four numbers that are meant to explain
+        // each other, each is rounded to 0.01 before Not Billed is derived, so Logged is always
+        // exactly Billed + Not Billable + Not Billed on screen.
+        // [GIVEN] A Billable entry of 2 h allocated 3 h, a Billed entry of 1 h allocated -0.5 h,
+        // a Billable entry of 1/3 h allocated 1/6 h, and an Open entry of 1/3 h that is reviewed
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('OVER', JobNo, 'T1', D() - 3, 2, "BCJ Billing Status"::Billable);
+        SetBillableHours('OVER', 3);
+        AddEntry('NEG', JobNo, 'T1', D() - 2, 1, "BCJ Billing Status"::Billed);
+        SetBillableHours('NEG', -0.5);
+        AddEntry('THIRD', JobNo, 'T1', D() - 1, 1 / 3, "BCJ Billing Status"::Billable);
+        SetBillableHours('THIRD', 1 / 6);
+        AddEntry('OPEN', JobNo, 'T1', D(), 1 / 3, "BCJ Billing Status"::Open);
+        // [WHEN] The task is sent for review
+        CreateOneReview(Review);
+        // [THEN] Logged 3.67 = Billed 2.17 (2 + 1/6) + Not Billable 1.17 (1 + 1/6) + Not Billed 0.33
+        ReviewLine.Get(Review."Review No.", 'T1');
+        AssertTaskSnapshot(ReviewLine, 3.67, 2.17, 1.17, 0.33, 'Task T1 with over-, under- and fractionally allocated entries');
+        Assert.AreEqual(
+          ReviewLine."Task Logged Hours",
+          ReviewLine."Task Billed Hours" + ReviewLine."Task Not Billable Hours" + ReviewLine."Task Not Billed Hours",
+          'The four task figures must balance exactly: Logged = Billed + Not Billable + Not Billed');
+    end;
+
+    [Test]
+    procedure ReviewLine_HoursToBillOutsideRangeIsRejected()
+    var
+        Review: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] The consultant may ask the customer to approve less than was logged - never
+        // more, because that would bill hours nobody worked, and never less than nothing. Anything
+        // between 0 and the logged hours is a legitimate commercial decision and must be accepted.
+        // [GIVEN] A review line with 3 logged hours
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        ReviewLine.Get(Review."Review No.", 'T1');
+        // [WHEN] More hours than logged are asked for
+        // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
+        Commit();
+        asserterror ReviewLine.Validate("Hours to Bill", 3.01);
+        // [THEN] Refused and the stored value is unchanged
+        Assert.ExpectedErrorCode('Dialog');
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(3.0, ReviewLine."Hours to Bill", 'Asking for more hours than were logged must leave Hours to Bill unchanged');
+        // [WHEN] A negative number of hours is asked for
+        // (The field minimum may catch this before the range check does, so only the state is asserted.)
+        asserterror ReviewLine.Validate("Hours to Bill", -1);
+        // [THEN] Refused and the stored value is still unchanged
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(3.0, ReviewLine."Hours to Bill", 'Asking for a negative number of hours must leave Hours to Bill unchanged');
+        // [WHEN] Values inside the range are asked for, including both bounds
+        SetHoursToBill(Review."Review No.", 'T1', 0);
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(0.0, ReviewLine."Hours to Bill", 'Zero hours to bill must be accepted - the consultant may ask for nothing');
+        SetHoursToBill(Review."Review No.", 'T1', 3);
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(3.0, ReviewLine."Hours to Bill", 'Hours to bill equal to the logged hours must be accepted');
+        SetHoursToBill(Review."Review No.", 'T1', 1.5);
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(1.5, ReviewLine."Hours to Bill", 'Hours to bill between 0 and the logged hours must be accepted and stored');
+    end;
+
+    [Test]
+    procedure ReviewLine_LoweringHoursToBillLowersApprovedHours()
+    var
+        Review: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] The customer can never have approved more than they were asked for. When the
+        // consultant lowers the request below an approval already on the line, the approval must
+        // follow it down - otherwise the line would carry an approval the review no longer allows
+        // and the submit would be refused for a state the consultant created. An approval that
+        // still fits under the new request is the customer's own answer and must be left alone.
+        // [GIVEN] A line of 4 logged hours with 3 hours approved
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 4, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        SetApproved(Review."Review No.", 'T1', 3);
+        // [WHEN] Hours to Bill is lowered to 3.5, still above the approval
+        SetHoursToBill(Review."Review No.", 'T1', 3.5);
+        // [THEN] The approval is unchanged
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(3.0, ReviewLine."Approved Hours", 'An approval that still fits under the new Hours to Bill must not be changed');
+        // [WHEN] Hours to Bill is lowered to 2, below the approval
+        SetHoursToBill(Review."Review No.", 'T1', 2);
+        // [THEN] The approval is lowered to the new Hours to Bill
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(2.0, ReviewLine."Hours to Bill", 'The lowered Hours to Bill must be stored');
+        Assert.AreEqual(2.0, ReviewLine."Approved Hours", 'An approval above the new Hours to Bill must be lowered to exactly the new Hours to Bill');
+    end;
+
+    [Test]
+    procedure ReviewLine_ApprovedHoursAboveHoursToBillIsRejected()
+    var
+        Review: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] Once the consultant has asked for fewer hours than were logged, the request -
+        // not the logged time - is the ceiling of the approval. A customer who could approve up to
+        // the logged hours would be approving hours the consultant chose not to charge, and the
+        // invoice would exceed what the firm offered.
+        // [GIVEN] A line of 3 logged hours of which 2 are asked for
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        SetHoursToBill(Review."Review No.", 'T1', 2);
+        ReviewLine.Get(Review."Review No.", 'T1');
+        // [WHEN] 2.5 hours are approved - within the logged hours but above the request
+        // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
+        Commit();
+        asserterror ReviewLine.Validate("Approved Hours", 2.5);
+        // [THEN] Refused and the stored approval is unchanged
+        Assert.ExpectedErrorCode('Dialog');
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(0.0, ReviewLine."Approved Hours", 'Approving more than Hours to Bill must be refused even when it is within the logged hours');
+        // [WHEN] Exactly the requested hours are approved
+        SetApproved(Review."Review No.", 'T1', 2);
+        // [THEN] Accepted
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(2.0, ReviewLine."Approved Hours", 'Approving exactly the Hours to Bill must be accepted');
+    end;
+
+    [Test]
+    procedure SubmitReview_ApprovedAboveHoursToBillWrittenDirectlyIsRejected()
+    var
+        Review: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] Field validation can be bypassed - an API or a direct write stores the value
+        // without it. The submit is the last door before hours become invoiceable, so it checks
+        // the approval against what was asked for once more. Letting it through would bill hours
+        // the consultant chose not to charge; the review must stay out with the customer instead.
+        // [GIVEN] A line of 3 logged hours with 2 asked for, and 2.5 approved written directly
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 1, "BCJ Billing Status"::Open);
+        AddEntry('E2', JobNo, 'T1', D() + 1, 2, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        SetHoursToBill(Review."Review No.", 'T1', 2);
+        ReviewLine.Get(Review."Review No.", 'T1');
+        ReviewLine."Approved Hours" := 2.5;
+        ReviewLine.Modify(false);
+        // [WHEN] The review is submitted
+        // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
+        Commit();
+        asserterror CustomerReviewMgt.SubmitReview(Review);
+        // [THEN] Refused; the review is still out and no entry was decided
+        Review.Get(Review."Review No.");
+        Assert.AreEqual("BCJ Review Status"::Sent, Review.Status, 'A review with an approval above Hours to Bill must not be answered');
+        Assert.AreEqual(0DT, Review."Answered On", 'A refused submit must not stamp an answer time');
+        AssertEntry('E1', "BCJ Billing Status"::"Sent for Review", 1, Review."Review No.", 'A refused submit must leave the entries in review with their full hours');
+        AssertEntry('E2', "BCJ Billing Status"::"Sent for Review", 2, Review."Review No.", 'A refused submit must leave the entries in review with their full hours');
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(0.0, ReviewLine."Applied Hours", 'A refused submit must apply nothing');
+    end;
+
+    [Test]
+    procedure SetHoursToBillPct_FiftyPercentEndToEnd()
+    var
+        Review: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] The business case the feature exists for: the consultant logged 10 hours but
+        // will only charge half. They set 50% before sending, the customer sees and approves 5,
+        // and the 5 hours land on the worklogs oldest first exactly as a direct approval would -
+        // the older 6-hour entry carries all 5, the newer one is written off, never left Open.
+        // [GIVEN] A task with 6 h (older) and 4 h (newer) sent for review
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('OLD', JobNo, 'T1', D(), 6, "BCJ Billing Status"::Open);
+        AddEntry('NEW', JobNo, 'T1', D() + 1, 4, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        // [WHEN] The consultant asks for 50%
+        CustomerReviewMgt.SetHoursToBillPct(Review, 50);
+        // [THEN] The line asks for 5 hours
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(10.0, ReviewLine."Logged Hours", 'Setting a percentage must not change the logged hours');
+        Assert.AreEqual(5.0, ReviewLine."Hours to Bill", '50% of 10 logged hours must ask the customer for 5 hours');
+        Review.Get(Review."Review No.");
+        Review.CalcFields("Hours to Bill");
+        Assert.AreEqual(5.0, Review."Hours to Bill", 'The review must total the hours asked for');
+        // [WHEN] The customer approves the 5 hours and submits
+        SetApproved(Review."Review No.", 'T1', 5);
+        CustomerReviewMgt.SubmitReview(Review);
+        // [THEN] The older entry is billable for 5, the newer is not billable
+        Review.Get(Review."Review No.");
+        Assert.AreEqual("BCJ Review Status"::Answered, Review.Status, 'A review approved within its Hours to Bill must be answered');
+        AssertEntry('OLD', "BCJ Billing Status"::Billable, 5, Review."Review No.", 'The oldest entry must carry the approved hours first');
+        AssertEntry('NEW', "BCJ Billing Status"::"Not Billable", 0, Review."Review No.", 'The entry left with no approved hours must be Not Billable');
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(5.0, ReviewLine."Applied Hours", 'All 5 approved hours must be applied');
+    end;
+
+    [Test]
+    procedure SetHoursToBillPct_RoundsAndLowersApprovedHours()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        TempReview: Record "BCJ Customer Review" temporary;
+        Review: Record "BCJ Customer Review";
+        OtherReview: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        CustomerNo: Code[20];
+        JobNo: Code[20];
+        OtherJobNo: Code[20];
+    begin
+        // [SCENARIO] The customer is shown two decimals, so the percentage result is rounded to
+        // 0.01 the ordinary way (0.625 -> 0.63): truncating would shave a fraction off every task
+        // in the firm's disfavour. An approval above the new request is lowered to it, one below
+        // is the customer's answer and stays. The percentage applies to the one review it was
+        // called for - another project's review has its own agreement.
+        // [GIVEN] Review of P1: T1 logged 1.25 h with 0.5 approved, T2 logged 4 h with 4 approved;
+        // and a separate review of P2 with 2 h logged
+        Initialize();
+        CustomerNo := CreateCustomer('C');
+        JobNo := CreateProject('P1', CustomerNo);
+        OtherJobNo := CreateProject('P2', CustomerNo);
+        CreateTask(JobNo, 'T1');
+        CreateTask(JobNo, 'T2');
+        CreateTask(OtherJobNo, 'T1');
+        AddEntry('A1', JobNo, 'T1', D(), 1.25, "BCJ Billing Status"::Open);
+        AddEntry('A2', JobNo, 'T2', D(), 4, "BCJ Billing Status"::Open);
+        AddEntry('B1', OtherJobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
+        FilterOwnProjects(TimeEntry);
+        CustomerReviewMgt.CreateReviews(TimeEntry, TempReview);
+        GetReviewOfProject(JobNo, Review);
+        GetReviewOfProject(OtherJobNo, OtherReview);
+        SetApproved(Review."Review No.", 'T1', 0.5);
+        SetApproved(Review."Review No.", 'T2', 4);
+        // [WHEN] 50% is set on the P1 review
+        CustomerReviewMgt.SetHoursToBillPct(Review, 50);
+        // [THEN] T1 asks for 0.63 and keeps its approval of 0.5
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(0.63, ReviewLine."Hours to Bill", '50% of 1.25 hours must be rounded to 0.63, the standard way');
+        Assert.AreEqual(0.5, ReviewLine."Approved Hours", 'An approval below the new Hours to Bill must be left as the customer gave it');
+        // [THEN] T2 asks for 2 and its approval is lowered to 2
+        ReviewLine.Get(Review."Review No.", 'T2');
+        Assert.AreEqual(2.0, ReviewLine."Hours to Bill", '50% of 4 hours must ask for 2 hours');
+        Assert.AreEqual(2.0, ReviewLine."Approved Hours", 'An approval above the new Hours to Bill must be lowered to it');
+        // [THEN] The other review is untouched
+        ReviewLine.Get(OtherReview."Review No.", 'T1');
+        Assert.AreEqual(2.0, ReviewLine."Hours to Bill", 'Setting a percentage on one review must not change the lines of another review');
+    end;
+
+    [Test]
+    procedure SetHoursToBillPct_ZeroAndHundredAreAccepted()
+    var
+        Review: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] 0% (a goodwill task, charge nothing) and 100% (undo an earlier cut) are both
+        // everyday choices, so both bounds are inside the allowed range. 100% must restore the
+        // request to exactly the logged hours; 0% must also pull any approval down to nothing.
+        // [GIVEN] A line of 3 logged hours with 3 approved
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        SetApproved(Review."Review No.", 'T1', 3);
+        // [WHEN] 0% is set
+        CustomerReviewMgt.SetHoursToBillPct(Review, 0);
+        // [THEN] Nothing is asked for and nothing stays approved
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(0.0, ReviewLine."Hours to Bill", '0% must ask the customer for no hours');
+        Assert.AreEqual(0.0, ReviewLine."Approved Hours", '0% must lower any approval to zero');
+        // [WHEN] 100% is set
+        Review.Get(Review."Review No.");
+        CustomerReviewMgt.SetHoursToBillPct(Review, 100);
+        // [THEN] The full logged hours are asked for again
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(3.0, ReviewLine."Hours to Bill", '100% must ask for exactly the logged hours');
+    end;
+
+    [Test]
+    procedure SetHoursToBillPct_OutOfRangeIsRejected()
+    var
+        Review: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] More than 100% would bill hours nobody worked; a negative percentage is
+        // meaningless. Either is a typo and must be refused before any line is touched - a
+        // half-applied percentage would leave the review asking for a mix of old and new figures.
+        // [GIVEN] A review over two tasks, one with an approval
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        CreateTask(JobNo, 'T2');
+        AddEntry('E1', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
+        AddEntry('E2', JobNo, 'T2', D(), 2, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        SetApproved(Review."Review No.", 'T1', 3);
+        // [WHEN] 150% is set
+        // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
+        Commit();
+        asserterror CustomerReviewMgt.SetHoursToBillPct(Review, 150);
+        // [THEN] Refused and no line changed
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(3.0, ReviewLine."Hours to Bill", 'A refused percentage above 100 must leave Hours to Bill unchanged');
+        Assert.AreEqual(3.0, ReviewLine."Approved Hours", 'A refused percentage above 100 must leave the approval unchanged');
+        ReviewLine.Get(Review."Review No.", 'T2');
+        Assert.AreEqual(2.0, ReviewLine."Hours to Bill", 'A refused percentage above 100 must leave every line unchanged');
+        // [WHEN] -1% is set
+        Review.Get(Review."Review No.");
+        asserterror CustomerReviewMgt.SetHoursToBillPct(Review, -1);
+        // [THEN] Refused and no line changed
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(3.0, ReviewLine."Hours to Bill", 'A refused negative percentage must leave Hours to Bill unchanged');
+        Assert.AreEqual(3.0, ReviewLine."Approved Hours", 'A refused negative percentage must leave the approval unchanged');
+        ReviewLine.Get(Review."Review No.", 'T2');
+        Assert.AreEqual(2.0, ReviewLine."Hours to Bill", 'A refused negative percentage must leave every line unchanged');
+    end;
+
+    [Test]
+    procedure SetHoursToBillPct_OnAnsweredReviewIsRejected()
+    var
+        Review: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] Once the customer has answered, the lines are the record of what was asked
+        // and agreed, and the allocation has been made on the strength of it. Changing what was
+        // asked afterwards would rewrite the question under the customer's answer.
+        // [GIVEN] An answered review
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 4, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        SetApproved(Review."Review No.", 'T1', 4);
+        CustomerReviewMgt.SubmitReview(Review);
+        Review.Get(Review."Review No.");
+        // [WHEN] A percentage is set
+        // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
+        Commit();
+        asserterror CustomerReviewMgt.SetHoursToBillPct(Review, 50);
+        // [THEN] Refused on the status and nothing changed
+        Assert.ExpectedErrorCode('TestField');
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(4.0, ReviewLine."Hours to Bill", 'An answered review must keep the Hours to Bill the customer answered');
+        Assert.AreEqual(4.0, ReviewLine."Approved Hours", 'An answered review must keep the approval the customer gave');
+        AssertEntry('E1', "BCJ Billing Status"::Billable, 4, Review."Review No.", 'A refused percentage must not change the applied allocation');
+    end;
+
+    [Test]
+    procedure SetHoursToBillPct_OnCancelledReviewIsRejected()
+    var
+        Review: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] A cancelled review has been taken back and its hours released; it will never
+        // be answered. Changing what it asks for is pointless and would make the historic record
+        // disagree with what the customer was actually sent.
+        // [GIVEN] A cancelled review
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 4, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        CustomerReviewMgt.CancelReview(Review);
+        Review.Get(Review."Review No.");
+        // [WHEN] A percentage is set
+        // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
+        Commit();
+        asserterror CustomerReviewMgt.SetHoursToBillPct(Review, 50);
+        // [THEN] Refused on the status and nothing changed
+        Assert.ExpectedErrorCode('TestField');
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(4.0, ReviewLine."Hours to Bill", 'A cancelled review must keep the Hours to Bill it was sent with');
+        AssertEntry('E1', "BCJ Billing Status"::Open, 4, 0, 'A refused percentage must not touch the released entry');
+    end;
+
+    local procedure SetHoursToBill(ReviewNo: Integer; TaskNo: Code[20]; Hours: Decimal)
+    var
+        ReviewLine: Record "BCJ Customer Review Line";
+    begin
+        ReviewLine.Get(ReviewNo, TaskNo);
+        ReviewLine.Validate("Hours to Bill", Hours);
+        ReviewLine.Modify(true);
+    end;
+
+    local procedure AssertTaskSnapshot(ReviewLine: Record "BCJ Customer Review Line"; Logged: Decimal; Billed: Decimal; NotBillable: Decimal; NotBilled: Decimal; LineName: Text)
+    begin
+        Assert.AreEqual(Logged, ReviewLine."Task Logged Hours", LineName + ': Task Logged Hours must be every hour ever logged on the task, whatever the selection');
+        Assert.AreEqual(Billed, ReviewLine."Task Billed Hours", LineName + ': Task Billed Hours must be the allocated hours of Billed and Billable entries, clamped to their logged time');
+        Assert.AreEqual(NotBillable, ReviewLine."Task Not Billable Hours", LineName + ': Task Not Billable Hours must be Not Billable entries plus the unallocated time of Billed and Billable entries');
+        Assert.AreEqual(NotBilled, ReviewLine."Task Not Billed Hours", LineName + ': Task Not Billed Hours must be the undecided hours, Logged - Billed - Not Billable');
+    end;
+
+    // ---------------------------------------------------------------------------------
     // Fixtures
     // ---------------------------------------------------------------------------------
 

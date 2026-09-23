@@ -2,7 +2,8 @@ codeunit 50107 "BCJ Customer Review Mgt."
 {
     var
         NothingToSendErr: Label 'The selected lines contain no open time entries to send for customer review.';
-        ApprovedHoursOutOfRangeErr: Label 'The approved hours must be between 0 and %1.', Comment = '%1 = logged hours on the line';
+        ApprovedHoursOutOfRangeErr: Label 'The approved hours must be between 0 and %1.', Comment = '%1 = hours to bill on the line';
+        PctOutOfRangeErr: Label 'The percentage must be between 0 and 100.';
 
     /// <summary>
     /// Creates one review per Project No. from the Open time entries within the filters and marks of TimeEntry.
@@ -83,14 +84,58 @@ codeunit 50107 "BCJ Customer Review Mgt."
         // and the approved hours are validated against this value, so round it once here.
         ReviewLine.Reset();
         ReviewLine.SetRange("Review No.", Review."Review No.");
+        // Hours to Bill starts at everything logged; the user lowers it on the review before sending.
         if ReviewLine.FindSet(true) then
             repeat
                 ReviewLine."Logged Hours" := Round(ReviewLine."Logged Hours", 0.01);
+                ReviewLine."Hours to Bill" := ReviewLine."Logged Hours";
+                SetTaskSnapshot(ReviewLine, Review."Project No.");
                 ReviewLine.Modify(false);
             until ReviewLine.Next() = 0;
 
         TempReview := Review;
         TempReview.Insert();
+    end;
+
+    /// <summary>
+    /// Captures the task's whole history on the line, over every time entry of the project task (this review's included):
+    /// billed = allocated hours of Billed and Billable entries, not billable = Not Billable entries plus the unallocated
+    /// part of Billed and Billable ones, not billed = the rest (Open and Sent for Review).
+    /// </summary>
+    local procedure SetTaskSnapshot(var ReviewLine: Record "BCJ Customer Review Line"; ProjectNo: Code[20])
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        Allocated: Decimal;
+        Logged: Decimal;
+        Billed: Decimal;
+        NotBillable: Decimal;
+    begin
+        TimeEntry.SetRange("Project No.", ProjectNo);
+        TimeEntry.SetRange("Project Task No.", ReviewLine."Project Task No.");
+        TimeEntry.SetLoadFields("Time Spent in Hours", "Billable Hours", "Billing Status");
+        if TimeEntry.FindSet() then
+            repeat
+                Logged += TimeEntry."Time Spent in Hours";
+                case TimeEntry."Billing Status" of
+                    TimeEntry."Billing Status"::Billed, TimeEntry."Billing Status"::Billable:
+                        begin
+                            Allocated := TimeEntry."Billable Hours";
+                            if Allocated > TimeEntry."Time Spent in Hours" then
+                                Allocated := TimeEntry."Time Spent in Hours";
+                            if Allocated < 0 then
+                                Allocated := 0;
+                            Billed += Allocated;
+                            NotBillable += TimeEntry."Time Spent in Hours" - Allocated;
+                        end;
+                    TimeEntry."Billing Status"::"Not Billable":
+                        NotBillable += TimeEntry."Time Spent in Hours";
+                end;
+            until TimeEntry.Next() = 0;
+        // Round each figure first and derive Not Billed, so the four always add up exactly.
+        ReviewLine."Task Logged Hours" := Round(Logged, 0.01);
+        ReviewLine."Task Billed Hours" := Round(Billed, 0.01);
+        ReviewLine."Task Not Billable Hours" := Round(NotBillable, 0.01);
+        ReviewLine."Task Not Billed Hours" := ReviewLine."Task Logged Hours" - ReviewLine."Task Billed Hours" - ReviewLine."Task Not Billable Hours";
     end;
 
     local procedure NewAccessToken(): Text[50]
@@ -137,8 +182,8 @@ codeunit 50107 "BCJ Customer Review Mgt."
         ReviewLine.SetRange("Review No.", Review."Review No.");
         if ReviewLine.FindSet() then
             repeat
-                if (ReviewLine."Approved Hours" < 0) or (ReviewLine."Approved Hours" > ReviewLine."Logged Hours") then
-                    Error(ApprovedHoursOutOfRangeErr, ReviewLine."Logged Hours");
+                if (ReviewLine."Approved Hours" < 0) or (ReviewLine."Approved Hours" > ReviewLine."Hours to Bill") then
+                    Error(ApprovedHoursOutOfRangeErr, ReviewLine."Hours to Bill");
             until ReviewLine.Next() = 0;
         Review.Status := Review.Status::Answered;
         Review."Answered On" := CurrentDateTime();
@@ -284,5 +329,24 @@ codeunit 50107 "BCJ Customer Review Mgt."
                 end;
             until EntryInFilter.Next() = 0;
         exit(TempReview.Count());
+    end;
+
+    /// <summary>
+    /// Sets Hours to Bill on every line of a review that is still Sent to Pct percent of the line's Logged Hours,
+    /// rounded to 0.01. Pct must be between 0 and 100.
+    /// </summary>
+    procedure SetHoursToBillPct(var Review: Record "BCJ Customer Review"; Pct: Decimal)
+    var
+        ReviewLine: Record "BCJ Customer Review Line";
+    begin
+        Review.TestField(Status, Review.Status::Sent);
+        if (Pct < 0) or (Pct > 100) then
+            Error(PctOutOfRangeErr);
+        ReviewLine.SetRange("Review No.", Review."Review No.");
+        if ReviewLine.FindSet(true) then
+            repeat
+                ReviewLine.Validate("Hours to Bill", Round(ReviewLine."Logged Hours" * Pct / 100, 0.01));
+                ReviewLine.Modify(true);
+            until ReviewLine.Next() = 0;
     end;
 }

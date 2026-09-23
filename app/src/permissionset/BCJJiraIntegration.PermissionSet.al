@@ -18,6 +18,7 @@ permissionset 50100 "BCJ JiraIntegration"
         page "BCJ Customer Review Subform"=X,
         page "BCJ Customer Review API"=X,
         page "BCJ Cust. Review Line API"=X,
+        page "BCJ Hours to Bill Pct Dialog"=X,
         table "BCJ Jira Integration Setup"=X,
         table "BCJ Project Time Entry"=X,
         table "BCJ Billing Overview Buffer"=X,

@@ -79,6 +79,14 @@ table 50103 "BCJ Customer Review"
             CalcFormula = sum("BCJ Customer Review Line"."Applied Hours" where("Review No." = field("Review No.")));
             Editable = false;
         }
+        field(23; "Hours to Bill"; Decimal)
+        {
+            Caption = 'Hours to Bill';
+            DecimalPlaces = 0 : 2;
+            FieldClass = FlowField;
+            CalcFormula = sum("BCJ Customer Review Line"."Hours to Bill" where("Review No." = field("Review No.")));
+            Editable = false;
+        }
     }
     keys
     {

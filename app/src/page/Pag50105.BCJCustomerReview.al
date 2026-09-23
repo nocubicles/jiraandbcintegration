@@ -46,7 +46,12 @@ page 50105 "BCJ Customer Review"
 
                 field("Logged Hours"; Rec."Logged Hours")
                 {
-                    ToolTip = 'Specifies the hours sent to the customer.';
+                    ToolTip = 'Specifies the hours logged on the time entries included in this review.';
+                }
+                field("Hours to Bill"; Rec."Hours to Bill")
+                {
+                    Style = Strong;
+                    ToolTip = 'Specifies the hours you ask the customer to approve. Set them per task in the lines, or for all tasks with Set Hours to Bill %.';
                 }
                 field("Approved Hours"; Rec."Approved Hours")
                 {
@@ -61,6 +66,8 @@ page 50105 "BCJ Customer Review"
             {
                 Caption = 'Tasks';
                 SubPageLink = "Review No." = field("Review No.");
+                // Editing Hours to Bill on a line must refresh the totals in the header.
+                UpdatePropagation = Both;
             }
             group(Communication)
             {
@@ -105,6 +112,24 @@ page 50105 "BCJ Customer Review"
                         Message(EmailSentMsg, Rec."Sent To E-Mail")
                     else
                         Message(EmailNotSentMsg);
+                end;
+            }
+            action(SetHoursToBillPct)
+            {
+                Caption = 'Set Hours to Bill %';
+                Image = Percentage;
+                Enabled = Rec.Status = Rec.Status::Sent;
+                ToolTip = 'Set the hours to bill on every task to a percentage of its logged hours, for example 50. You can still change single tasks afterwards.';
+
+                trigger OnAction()
+                var
+                    PctDialog: Page "BCJ Hours to Bill Pct Dialog";
+                    CustomerReviewMgt: Codeunit "BCJ Customer Review Mgt.";
+                begin
+                    if PctDialog.RunModal() <> Action::OK then
+                        exit;
+                    CustomerReviewMgt.SetHoursToBillPct(Rec, PctDialog.GetPct());
+                    CurrPage.Update(false);
                 end;
             }
             action(Cancel)
@@ -163,6 +188,9 @@ page 50105 "BCJ Customer Review"
             {
                 Caption = 'Process';
 
+                actionref(SetHoursToBillPct_Promoted; SetHoursToBillPct)
+                {
+                }
                 actionref(SendEmail_Promoted; SendEmail)
                 {
                 }

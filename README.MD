@@ -41,16 +41,21 @@ Before billing, the customer can be asked which hours may be invoiced:
 1. In the **Jira Billing Overview** select customer, project or task rows and use **Send for Customer Review**.
    One **Customer Time Review** is created per project from the *Open* entries under the selection (within
    the current filters), with one line per task and the logged hours. The entries become *Sent for Review*
-   and are skipped by *Mark Selected As* until the review is answered or cancelled.
-2. The review is e-mailed (standard Email module, scenario *Jira Customer Time Review*) to the project's
-   **Bill-to Contact** e-mail, falling back to the bill-to customer's e-mail. The mail lists the tasks and
-   links to `<Customer Review Base URL>/review/<token>` (base URL in **Jira Integration Setup**). A project
-   without any e-mail still gets its review; send it later from the review card or copy the link.
+   and are skipped by *Mark Selected As* until the review is answered or cancelled. The new review opens
+   (the list, when several were created); nothing is e-mailed yet.
+2. On the review card set **Hours to Bill** per task (0 up to the hours in the review; it starts at all of
+   them), or for every task at once with **Set Hours to Bill %** (e.g. 50). Each line also holds a snapshot
+   of the task's whole history taken at creation: *Logged* (every hour on the task), *Billed* (billed or
+   approved earlier), *Not Billable* (written off earlier) and *Not Billed* (the rest, incl. this review).
+3. **Send E-Mail** on the card mails the review (standard Email module, scenario *Jira Customer Time Review*)
+   to the project's **Bill-to Contact** e-mail, falling back to the bill-to customer's e-mail, or share the
+   **Review Link** (`<Customer Review Base URL>/review/<token>`, base URL in **Jira Integration Setup**)
+   yourself. Mail and page show per task the four history figures and the highlighted *To approve* hours.
    On the Jira Billing Overview, **Customer Review** (or choosing the *Sent for Review Hours* value) opens
    the review the entries under the current line are waiting on — the list of them when there are several.
-3. The customer opens the link (the small web app in `review-web/`), enters the approved hours per task
-   (0 up to the logged hours) with an optional comment, and submits.
-4. On submit the answer is applied automatically: the approved hours are allocated to the task's entries
+4. The customer opens the link (the small web app in `review-web/`), enters the approved hours per task
+   (0 up to the Hours to Bill) with an optional comment, and submits.
+5. On submit the answer is applied automatically: the approved hours are allocated to the task's entries
    oldest first and stored in **Billable Hours**. Entries that receive hours become *Billable*, the rest
    *Not Billable*. A partly approved entry keeps its logged hours but only the approved part counts as
    billable in the overview; the remainder shows under *Not Billable*.
