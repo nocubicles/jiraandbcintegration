@@ -47,6 +47,30 @@ node server.js
 
 ## Deploy
 
-Any host that runs a container or Node works. `Dockerfile` is included. Set the environment
+Hosted on Azure App Service, Free tier (F1, Linux, Node 22), subscription "Azure subscription 1":
+
+| | |
+|---|---|
+| Resource group | `bcandjira` |
+| Plan | `plan-bcj-review-free` (West Europe, F1 — North Europe has no F1 quota) |
+| Web app | `bcj-review-integrated` → https://bcj-review-integrated.azurewebsites.net |
+| Startup command | `node server.js` (App Service sets `PORT`) |
+| Entra app | "BC Jira Customer Review Web" |
+
+Configuration lives in the web app's App settings (`az webapp config appsettings set`), never in the repo.
+Currently pointed at the `sandbox` environment, company "Integrated Technologies OÜ".
+
+Redeploy after changing `server.js`:
+
+```bash
+cd review-web
+zip review-web.zip server.js package.json
+az webapp deploy -g bcandjira -n bcj-review-integrated --src-path review-web.zip --type zip
+```
+
+F1 limits: 60 CPU minutes/day, the app sleeps when idle (first request after a pause takes a few
+seconds), no custom-domain TLS. Enough for a handful of customer reviews a month; move to B1 if not.
+
+Any other host that runs a container or Node works too. `Dockerfile` is included. Set the environment
 variables in the host, expose port 3000, point a domain at it, and put that domain into
 Customer Review Base URL in BC.
