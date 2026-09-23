@@ -204,6 +204,10 @@ function reviewPage(review, lines, message, values) {
     ${reopenedNotice}
     ${message ? `<div class="notice warn">${esc(message)}</div>` : ''}
     <form method="post" action="/review/${esc(review.accessToken)}">
+      <div class="actions">
+        <button type="button" class="secondary" id="approve-all">Approve all requested hours</button>
+        <button type="button" class="secondary" id="reject-all">Set all to 0</button>
+      </div>
       <div class="scroll"><table>
         <thead><tr><th>Task</th>${historyHeads}<th class="num ask">To approve</th><th class="num">Your approval</th></tr></thead>
         <tbody>${rows}</tbody>
@@ -212,8 +216,6 @@ function reviewPage(review, lines, message, values) {
       ${LEGEND}
       <div class="actions">
         <button type="submit">Submit answer</button>
-        <button type="button" class="secondary" id="approve-all">Approve all requested hours</button>
-        <button type="button" class="secondary" id="reject-all">Set all to 0</button>
       </div>
     </form>
     <script>
