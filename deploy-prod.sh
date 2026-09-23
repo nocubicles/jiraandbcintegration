@@ -33,7 +33,8 @@ for i in $(seq 1 60); do
   sleep 10
   STATUS=$(curl -s -H "Authorization: Bearer $TOK" "$BASE/companies($COMPANY_ID)/extensionDeploymentStatus" | python -c "
 import sys,json
-v=[e for e in json.load(sys.stdin)['value'] if e.get('appVersion')=='$VERSION']
+# The list is not in date order and may hold older attempts at the same version: take the newest.
+v=sorted((e for e in json.load(sys.stdin)['value'] if e.get('appVersion')=='$VERSION'), key=lambda e: e.get('startedOn',''))
 print(v[-1]['status'] if v else 'pending')")
   echo "  $STATUS"
   case "$STATUS" in Completed|Failed) break;; esac
