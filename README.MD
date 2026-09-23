@@ -46,6 +46,8 @@ Before billing, the customer can be asked which hours may be invoiced:
    **Bill-to Contact** e-mail, falling back to the bill-to customer's e-mail. The mail lists the tasks and
    links to `<Customer Review Base URL>/review/<token>` (base URL in **Jira Integration Setup**). A project
    without any e-mail still gets its review; send it later from the review card or copy the link.
+   **Copy Review Link** on the Jira Billing Overview shows the links of the reviews still waiting for an
+   answer under the current line, to send to the customer by hand.
 3. The customer opens the link (the small web app in `review-web/`), enters the approved hours per task
    (0 up to the logged hours) with an optional comment, and submits.
 4. On submit the answer is applied automatically: the approved hours are allocated to the task's entries

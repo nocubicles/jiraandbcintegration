@@ -255,6 +255,17 @@ page 50102 "BCJ Jira Billing Overview"
                     SendSelectionForReview();
                 end;
             }
+            action(CopyReviewLink)
+            {
+                Caption = 'Copy Review Link';
+                Image = Link;
+                ToolTip = 'Show the links of the customer reviews still waiting for an answer under the current line, so you can copy them and send them to the customer yourself.';
+
+                trigger OnAction()
+                begin
+                    ShowOpenReviewLinks();
+                end;
+            }
         }
         area(Navigation)
         {
@@ -329,6 +340,9 @@ page 50102 "BCJ Jira Billing Overview"
                 actionref(SendForReview_Promoted; SendForReview)
                 {
                 }
+                actionref(CopyReviewLink_Promoted; CopyReviewLink)
+                {
+                }
                 actionref(Refresh_Promoted; Refresh)
                 {
                 }
@@ -397,6 +411,7 @@ page 50102 "BCJ Jira Billing Overview"
         EntriesUpdatedMsg: Label '%1 time entries updated.', Comment = '%1 = number of time entries';
         EntriesInReviewMsg: Label '%1 time entries were not changed because they are waiting for a customer answer.', Comment = '%1 = number of time entries';
         ReviewsCreatedMsg: Label '%1 customer reviews created, %2 e-mails sent.', Comment = '%1 = number of reviews, %2 = number of e-mails';
+        NoOpenReviewMsg: Label 'There is no customer review waiting for an answer under this line.';
 
     local procedure RefreshOverview()
     var
@@ -512,5 +527,22 @@ page 50102 "BCJ Jira Billing Overview"
         SentCount := CustomerReviewMgt.SendReviews(TempReview);
         RefreshOverview();
         Message(ReviewsCreatedMsg, ReviewCount, SentCount);
+    end;
+
+    local procedure ShowOpenReviewLinks()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        CustomerReviewMgt: Codeunit "BCJ Customer Review Mgt.";
+        Links: Text;
+    begin
+        // Entries waiting for an answer are always Sent for Review, whichever status view is shown.
+        SetTimeEntryFilters(TimeEntry);
+        BillingOverviewMgt.ApplyLineFilter(Rec, TimeEntry);
+        TimeEntry.SetRange("Billing Status", TimeEntry."Billing Status"::"Sent for Review");
+        Links := CustomerReviewMgt.GetOpenReviewLinks(TimeEntry);
+        if Links = '' then
+            Message(NoOpenReviewMsg)
+        else
+            Message('%1', Links);
     end;
 }

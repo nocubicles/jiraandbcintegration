@@ -1311,6 +1311,256 @@ codeunit 50154 "BCJ Customer Review Tests"
     end;
 
     // ---------------------------------------------------------------------------------
+    // GetOpenReviewLinks
+    // ---------------------------------------------------------------------------------
+
+    [Test]
+    procedure GetOpenReviewLinks_OneSentReviewManyEntriesGivesOneLink()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        Review: Record "BCJ Customer Review";
+        JobNo: Code[20];
+        Links: Text;
+    begin
+        // [SCENARIO] The consultant selects worklogs to see which link the customer is sitting on,
+        // typically to paste it into a reminder. A review is one link no matter how many worklogs
+        // it covers: repeating it per entry would put the same link into the reminder several
+        // times, and a trailing separator would leave an empty line the consultant has to trim.
+        // Looking the link up is read-only - it must not move a single entry out of the review.
+        // [GIVEN] One Sent review holding three entries over two tasks
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        CreateTask(JobNo, 'T2');
+        AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
+        AddEntry('E2', JobNo, 'T1', D() + 1, 1, "BCJ Billing Status"::Open);
+        AddEntry('E3', JobNo, 'T2', D(), 3, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        // [WHEN] The links are requested for the whole project
+        FilterOwnProjects(TimeEntry);
+        Links := CustomerReviewMgt.GetOpenReviewLinks(TimeEntry);
+        // [THEN] Exactly the one review link, once, with no separator
+        Assert.AreEqual(ReviewMail.GetReviewLink(Review), Links, 'Several entries of one Sent review must yield that review link exactly once, with no separator');
+        // [THEN] Nothing was changed by looking
+        Review.Get(Review."Review No.");
+        Assert.AreEqual("BCJ Review Status"::Sent, Review.Status, 'Looking up the review links must leave the review Sent');
+        AssertEntry('E1', "BCJ Billing Status"::"Sent for Review", 2, Review."Review No.", 'Looking up the review links must not change the entries in review');
+        AssertEntry('E2', "BCJ Billing Status"::"Sent for Review", 1, Review."Review No.", 'Looking up the review links must not change the entries in review');
+        AssertEntry('E3', "BCJ Billing Status"::"Sent for Review", 3, Review."Review No.", 'Looking up the review links must not change the entries in review');
+    end;
+
+    [Test]
+    procedure GetOpenReviewLinks_TwoProjectsGiveTwoLinksInReviewNoOrder()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        TempReview: Record "BCJ Customer Review" temporary;
+        ReviewA: Record "BCJ Customer Review";
+        ReviewB: Record "BCJ Customer Review";
+        CustomerNo: Code[20];
+        JobA: Code[20];
+        JobB: Code[20];
+        Links: Text;
+    begin
+        // [SCENARIO] A selection over a customer can cover several projects, each with its own
+        // review and link. The links come one per line, in Review No. order - the order the
+        // reviews were sent - so the list is stable and matches the review list the consultant
+        // sees. Project P2 is deliberately sent first here, so its review has the lower number
+        // while its entries sort after P1's: an implementation that follows the entries instead
+        // of the review numbers produces the wrong order.
+        // [GIVEN] Two projects of one customer, P2 sent for review before P1
+        Initialize();
+        CustomerNo := CreateCustomer('C');
+        JobA := CreateProject('P1', CustomerNo);
+        JobB := CreateProject('P2', CustomerNo);
+        CreateTask(JobA, 'T1');
+        CreateTask(JobB, 'T1');
+        AddEntry('A1', JobA, 'T1', D(), 2, "BCJ Billing Status"::Open);
+        AddEntry('A2', JobA, 'T1', D(), 1, "BCJ Billing Status"::Open);
+        AddEntry('B1', JobB, 'T1', D(), 4, "BCJ Billing Status"::Open);
+        FilterOwnProjects(TimeEntry);
+        TimeEntry.SetRange("Project No.", JobB);
+        CustomerReviewMgt.CreateReviews(TimeEntry, TempReview);
+        FilterOwnProjects(TimeEntry);
+        TimeEntry.SetRange("Project No.", JobA);
+        CustomerReviewMgt.CreateReviews(TimeEntry, TempReview);
+        GetReviewOfProject(JobA, ReviewA);
+        GetReviewOfProject(JobB, ReviewB);
+        Assert.IsTrue(ReviewB."Review No." < ReviewA."Review No.", 'Fixture: the review sent first must have the lower Review No.');
+        // [WHEN] The links are requested for both projects
+        FilterOwnProjects(TimeEntry);
+        Links := CustomerReviewMgt.GetOpenReviewLinks(TimeEntry);
+        // [THEN] Both links, lower Review No. first, separated by exactly one line feed
+        Assert.AreEqual(
+          ReviewMail.GetReviewLink(ReviewB) + Lf() + ReviewMail.GetReviewLink(ReviewA),
+          Links,
+          'Two Sent reviews must yield both links in ascending Review No. order, separated by a single line feed and with no trailing separator');
+    end;
+
+    [Test]
+    procedure GetOpenReviewLinks_EntriesWithoutReviewGiveEmpty()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] Hours that were never sent have no link. Review No. 0 is the absence of a
+        // review, not a review to look up - returning anything here would hand the consultant a
+        // link that opens nothing.
+        // [GIVEN] Open entries that were never sent for review
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
+        AddEntry('E2', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Billable);
+        // [WHEN] / [THEN] There is no link
+        FilterOwnProjects(TimeEntry);
+        Assert.AreEqual('', CustomerReviewMgt.GetOpenReviewLinks(TimeEntry), 'Entries that belong to no review must yield no link at all');
+    end;
+
+    [Test]
+    procedure GetOpenReviewLinks_CancelledReviewGivesEmpty()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        Review: Record "BCJ Customer Review";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] A cancelled review has been taken back; its link must not be handed out
+        // again, or the customer is chased about hours the consultant has withdrawn. An entry
+        // invoiced while the review was out keeps its link to the cancelled review, so the link
+        // lookup must check the review status, not merely that the entry has a review number.
+        // [GIVEN] A cancelled review, one of whose entries was invoiced meanwhile and still points at it
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
+        AddEntry('BILLED', JobNo, 'T1', D() + 1, 3, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        SetEntryStatus('BILLED', "BCJ Billing Status"::Billed);
+        CustomerReviewMgt.CancelReview(Review);
+        AssertEntry('BILLED', "BCJ Billing Status"::Billed, 3, Review."Review No.", 'Fixture: the billed entry must still point at the cancelled review');
+        // [WHEN] / [THEN] There is no link
+        FilterOwnProjects(TimeEntry);
+        Assert.AreEqual('', CustomerReviewMgt.GetOpenReviewLinks(TimeEntry), 'A cancelled review must never yield a link, even when an entry still points at it');
+    end;
+
+    [Test]
+    procedure GetOpenReviewLinks_AnsweredReviewGivesEmpty()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        Review: Record "BCJ Customer Review";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] Once the customer has answered there is nothing left to chase. Handing out
+        // the link again would invite the customer to answer a second time, which the review
+        // refuses - so the consultant would be sending a link that only produces an error.
+        // Answered entries keep their Review No., so this again depends on the review status.
+        // [GIVEN] A review the customer has answered
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        SetApproved(Review."Review No.", 'T1', 2);
+        CustomerReviewMgt.SubmitReview(Review);
+        AssertEntry('E1', "BCJ Billing Status"::Billable, 2, Review."Review No.", 'Fixture: the answered entry must still point at its review');
+        // [WHEN] / [THEN] There is no link
+        FilterOwnProjects(TimeEntry);
+        Assert.AreEqual('', CustomerReviewMgt.GetOpenReviewLinks(TimeEntry), 'An answered review must never yield a link, even though its entries still point at it');
+    end;
+
+    [Test]
+    procedure GetOpenReviewLinks_MixOfSentAndAnsweredGivesOnlySent()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        TempReview: Record "BCJ Customer Review" temporary;
+        ReviewA: Record "BCJ Customer Review";
+        ReviewB: Record "BCJ Customer Review";
+        CustomerNo: Code[20];
+        JobA: Code[20];
+        JobB: Code[20];
+    begin
+        // [SCENARIO] Across a customer some reviews come back and some do not. Only the ones
+        // still out are worth a reminder; including an answered one would chase the customer for
+        // something they have already done.
+        // [GIVEN] Two projects sent together; the customer answers P1 but not P2
+        Initialize();
+        CustomerNo := CreateCustomer('C');
+        JobA := CreateProject('P1', CustomerNo);
+        JobB := CreateProject('P2', CustomerNo);
+        CreateTask(JobA, 'T1');
+        CreateTask(JobB, 'T1');
+        AddEntry('A1', JobA, 'T1', D(), 2, "BCJ Billing Status"::Open);
+        AddEntry('B1', JobB, 'T1', D(), 4, "BCJ Billing Status"::Open);
+        FilterOwnProjects(TimeEntry);
+        CustomerReviewMgt.CreateReviews(TimeEntry, TempReview);
+        GetReviewOfProject(JobA, ReviewA);
+        GetReviewOfProject(JobB, ReviewB);
+        SetApproved(ReviewA."Review No.", 'T1', 2);
+        CustomerReviewMgt.SubmitReview(ReviewA);
+        // [WHEN] The links are requested for the whole customer
+        FilterOwnProjects(TimeEntry);
+        // [THEN] Only the unanswered review's link
+        Assert.AreEqual(ReviewMail.GetReviewLink(ReviewB), CustomerReviewMgt.GetOpenReviewLinks(TimeEntry), 'Only the review still waiting for an answer may yield a link; the answered one must be left out');
+    end;
+
+    [Test]
+    procedure GetOpenReviewLinks_HonoursCallerFilter()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        TempReview: Record "BCJ Customer Review" temporary;
+        ReviewA: Record "BCJ Customer Review";
+        CustomerNo: Code[20];
+        JobA: Code[20];
+        JobB: Code[20];
+    begin
+        // [SCENARIO] The consultant asks about the worklogs they selected, not about every open
+        // review. A link to another project's review would end up in a reminder to the wrong
+        // contact - possibly exposing another project's hours to someone who should not see them.
+        // [GIVEN] Two projects, each with a Sent review
+        Initialize();
+        CustomerNo := CreateCustomer('C');
+        JobA := CreateProject('P1', CustomerNo);
+        JobB := CreateProject('P2', CustomerNo);
+        CreateTask(JobA, 'T1');
+        CreateTask(JobB, 'T1');
+        AddEntry('A1', JobA, 'T1', D(), 2, "BCJ Billing Status"::Open);
+        AddEntry('B1', JobB, 'T1', D(), 4, "BCJ Billing Status"::Open);
+        FilterOwnProjects(TimeEntry);
+        CustomerReviewMgt.CreateReviews(TimeEntry, TempReview);
+        GetReviewOfProject(JobA, ReviewA);
+        // [WHEN] The links are requested for project P1 only
+        FilterOwnProjects(TimeEntry);
+        TimeEntry.SetRange("Project No.", JobA);
+        // [THEN] Only P1's review link
+        Assert.AreEqual(ReviewMail.GetReviewLink(ReviewA), CustomerReviewMgt.GetOpenReviewLinks(TimeEntry), 'Only reviews of entries inside the caller filter may yield a link');
+    end;
+
+    [Test]
+    procedure GetOpenReviewLinks_NoMatchWithBlankBaseUrlGivesEmptyWithoutError()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        Review: Record "BCJ Customer Review";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] The lookup is offered on the overview whether or not reviews are in use, and
+        // a company that never configured the review web app has no base URL. Asking about hours
+        // that have no open review must then answer "none", not fail on setup the answer does not
+        // need - an error there would make the action look broken to everyone not using reviews.
+        // [GIVEN] Entries without a review, and entries whose review was cancelled
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        CustomerReviewMgt.CancelReview(Review);
+        AddEntry('E2', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
+        // [GIVEN] The review base URL is then cleared
+        BCJTestLibrary.EnsureSetup('');
+        // [WHEN] / [THEN] No link and no error
+        FilterOwnProjects(TimeEntry);
+        Assert.AreEqual('', CustomerReviewMgt.GetOpenReviewLinks(TimeEntry), 'With no Sent review in the filter the result must be empty, and a blank review base URL must not cause an error');
+    end;
+
+    // ---------------------------------------------------------------------------------
     // Fixtures
     // ---------------------------------------------------------------------------------
 
@@ -1445,6 +1695,14 @@ codeunit 50154 "BCJ Customer Review Tests"
     begin
         GetEntry(Suffix, TimeEntry);
         exit(TimeEntry."Billable Hours");
+    end;
+
+    local procedure Lf(): Text
+    var
+        LineFeed: Text[1];
+    begin
+        LineFeed[1] := 10;
+        exit(LineFeed);
     end;
 
     local procedure TaskDescription(JobNo: Code[20]; TaskNo: Code[20]): Text[100]
