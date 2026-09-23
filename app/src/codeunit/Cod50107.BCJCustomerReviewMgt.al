@@ -253,42 +253,36 @@ codeunit 50107 "BCJ Customer Review Mgt."
     end;
 
     /// <summary>
-    /// Returns the customer links of the reviews still waiting for an answer (Status Sent) that the time entries within
-    /// the filters of TimeEntry belong to. Each review appears once, in Review No. order, links separated by a line feed.
-    /// Entries without a review and reviews that are answered or cancelled are ignored. Returns '' when there is none.
+    /// Fills TempReview with the reviews still waiting for an answer (Status Sent) that the time entries within the
+    /// filters of TimeEntry belong to, each once, and returns how many there are. TempReview is emptied first.
+    /// Entries without a review and reviews that are answered or cancelled are ignored.
     /// Only filters are honoured, not marks: pass a filtered record, not a MarkedOnly selection.
     /// </summary>
-    procedure GetOpenReviewLinks(var TimeEntry: Record "BCJ Project Time Entry"): Text
+    procedure GetOpenReviews(var TimeEntry: Record "BCJ Project Time Entry"; var TempReview: Record "BCJ Customer Review" temporary): Integer
     var
         EntryInFilter: Record "BCJ Project Time Entry";
         Review: Record "BCJ Customer Review";
-        TempOpenReview: Record "BCJ Customer Review" temporary;
-        ReviewMail: Codeunit "BCJ Review Mail";
-        Links: TextBuilder;
-        Lf: Text[1];
+        TempSeenReview: Record "BCJ Customer Review" temporary;
     begin
+        TempReview.Reset();
+        TempReview.DeleteAll(false);
         // Work on a copy so the caller's record keeps its position; the caller's filters still apply.
         EntryInFilter.CopyFilters(TimeEntry);
         EntryInFilter.SetFilter("Review No.", '<>0');
         EntryInFilter.SetLoadFields("Review No.");
-        Review.SetLoadFields(Status, "Access Token");
         if EntryInFilter.FindSet() then
             repeat
-                if not TempOpenReview.Get(EntryInFilter."Review No.") then
+                // Each review is read once, whether it turns out open or not.
+                if not TempSeenReview.Get(EntryInFilter."Review No.") then begin
+                    TempSeenReview."Review No." := EntryInFilter."Review No.";
+                    TempSeenReview.Insert(false);
                     if Review.Get(EntryInFilter."Review No.") then
                         if Review.Status = Review.Status::Sent then begin
-                            TempOpenReview := Review;
-                            TempOpenReview.Insert(false);
+                            TempReview := Review;
+                            TempReview.Insert(false);
                         end;
+                end;
             until EntryInFilter.Next() = 0;
-        // The temporary table sorts by Review No., which gives the links in review order.
-        Lf[1] := 10;
-        if TempOpenReview.FindSet() then
-            repeat
-                if Links.Length() > 0 then
-                    Links.Append(Lf);
-                Links.Append(ReviewMail.GetReviewLink(TempOpenReview));
-            until TempOpenReview.Next() = 0;
-        exit(Links.ToText());
+        exit(TempReview.Count());
     end;
 }

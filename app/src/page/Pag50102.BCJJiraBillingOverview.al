@@ -161,7 +161,12 @@ page 50102 "BCJ Jira Billing Overview"
                 }
                 field("Sent for Review Hours"; Rec."Sent for Review Hours")
                 {
-                    ToolTip = 'Specifies the hours sent to the customer and waiting for an answer.';
+                    ToolTip = 'Specifies the hours sent to the customer and waiting for an answer. Choose the value to open the customer review.';
+
+                    trigger OnDrillDown()
+                    begin
+                        OpenReviewsForLine();
+                    end;
                 }
                 field("Billable Hours"; Rec."Billable Hours")
                 {
@@ -255,20 +260,20 @@ page 50102 "BCJ Jira Billing Overview"
                     SendSelectionForReview();
                 end;
             }
-            action(CopyReviewLink)
-            {
-                Caption = 'Copy Review Link';
-                Image = Link;
-                ToolTip = 'Show the links of the customer reviews still waiting for an answer under the current line, so you can copy them and send them to the customer yourself.';
-
-                trigger OnAction()
-                begin
-                    ShowOpenReviewLinks();
-                end;
-            }
         }
         area(Navigation)
         {
+            action(OpenCustomerReview)
+            {
+                Caption = 'Customer Review';
+                Image = Document;
+                ToolTip = 'Open the customer review that the time entries under the current line are waiting on, to see the tasks and hours sent to the customer. When there are several, the list of those reviews opens.';
+
+                trigger OnAction()
+                begin
+                    OpenReviewsForLine();
+                end;
+            }
             action(CustomerReviews)
             {
                 Caption = 'Customer Reviews';
@@ -340,9 +345,6 @@ page 50102 "BCJ Jira Billing Overview"
                 actionref(SendForReview_Promoted; SendForReview)
                 {
                 }
-                actionref(CopyReviewLink_Promoted; CopyReviewLink)
-                {
-                }
                 actionref(Refresh_Promoted; Refresh)
                 {
                 }
@@ -352,6 +354,9 @@ page 50102 "BCJ Jira Billing Overview"
                 Caption = 'Navigate';
 
                 actionref(TimeEntries_Promoted; TimeEntries)
+                {
+                }
+                actionref(OpenCustomerReview_Promoted; OpenCustomerReview)
                 {
                 }
                 actionref(CustomerReviews_Promoted; CustomerReviews)
@@ -529,20 +534,39 @@ page 50102 "BCJ Jira Billing Overview"
         Message(ReviewsCreatedMsg, ReviewCount, SentCount);
     end;
 
-    local procedure ShowOpenReviewLinks()
+    local procedure OpenReviewsForLine()
     var
         TimeEntry: Record "BCJ Project Time Entry";
+        Review: Record "BCJ Customer Review";
+        TempReview: Record "BCJ Customer Review" temporary;
         CustomerReviewMgt: Codeunit "BCJ Customer Review Mgt.";
-        Links: Text;
     begin
         // Entries waiting for an answer are always Sent for Review, whichever status view is shown.
         SetTimeEntryFilters(TimeEntry);
         BillingOverviewMgt.ApplyLineFilter(Rec, TimeEntry);
         TimeEntry.SetRange("Billing Status", TimeEntry."Billing Status"::"Sent for Review");
-        Links := CustomerReviewMgt.GetOpenReviewLinks(TimeEntry);
-        if Links = '' then
-            Message(NoOpenReviewMsg)
-        else
-            Message('%1', Links);
+        case CustomerReviewMgt.GetOpenReviews(TimeEntry, TempReview) of
+            0:
+                begin
+                    Message(NoOpenReviewMsg);
+                    exit;
+                end;
+            1:
+                begin
+                    TempReview.FindFirst();
+                    Review.SetRange("Review No.", TempReview."Review No.");
+                    Page.RunModal(Page::"BCJ Customer Review", Review);
+                end;
+            else begin
+                TempReview.FindSet();
+                repeat
+                    if Review.Get(TempReview."Review No.") then
+                        Review.Mark(true);
+                until TempReview.Next() = 0;
+                Review.MarkedOnly(true);
+                Page.RunModal(Page::"BCJ Customer Reviews", Review);
+            end;
+        end;
+        RefreshOverview();
     end;
 }

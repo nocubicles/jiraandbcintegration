@@ -58,7 +58,7 @@ Hosted on Azure App Service, Free tier (F1, Linux, Node 22), subscription "Azure
 | Entra app | "BC Jira Customer Review Web" |
 
 Configuration lives in the web app's App settings (`az webapp config appsettings set`), never in the repo.
-Currently pointed at the `sandbox` environment, company "Integrated Technologies OÜ".
+Currently pointed at the `sandbox` environment, company "Integrated 22072026" (`1113bedb-8f85-f111-8072-0022489f11cd`). One deployment serves one company.
 
 Redeploy after changing `server.js`:
 
