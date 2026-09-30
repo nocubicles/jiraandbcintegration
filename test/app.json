@@ -2,7 +2,7 @@
   "id": "b14667f3-01f5-44e5-b79e-66b22f3f922f",
   "name": "bcjiraintegration Tests",
   "publisher": "integrated.ee",
-  "version": "1.1.0.0",
+  "version": "1.1.1.0",
   "brief": "Automated tests for bcjiraintegration",
   "description": "Automated tests for bcjiraintegration",
   "privacyStatement": "",
@@ -15,7 +15,7 @@
       "id": "f5cc8010-9fee-4668-beaa-f8ec318f3e1b",
       "name": "bcjiraintegration",
       "publisher": "integrated.ee",
-      "version": "1.1.0.0"
+      "version": "1.1.1.0"
     },
     {
       "id": "dd0be2ea-f733-4d65-bb34-a28f4624fb14",

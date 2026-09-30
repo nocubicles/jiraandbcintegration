@@ -47,6 +47,9 @@ Before billing, the customer can be asked which hours may be invoiced:
    them), or for every task at once with **Set Hours to Bill %** (e.g. 50). Each line also holds a snapshot
    of the task's whole history taken at creation: *Logged* (every hour on the task), *Billed* (billed or
    approved earlier), *Not Billable* (written off earlier) and *Not Billed* (the rest, incl. this review).
+   While the review waits, the Jira Billing Overview shows only the Hours to Bill as *Sent for Review*
+   (spread over the task's entries oldest first, as the answer will be) and the hours left out as
+   *Not Billable*, so *Unbilled* is what the customer is asked to pay.
 3. **Send E-Mail** on the card mails the review (standard Email module, scenario *Jira Customer Time Review*)
    to the project's **Bill-to Contact** e-mail, falling back to the bill-to customer's e-mail, or share the
    **Review Link** (`<Customer Review Base URL>/review/<token>`, base URL in **Jira Integration Setup**)

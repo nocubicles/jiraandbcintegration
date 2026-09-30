@@ -153,7 +153,7 @@ page 50102 "BCJ Jira Billing Overview"
                 field("Unbilled Hours"; Rec."Unbilled Hours")
                 {
                     Style = Attention;
-                    ToolTip = 'Specifies the hours that are not billed yet and not excluded from billing (Open + Billable).';
+                    ToolTip = 'Specifies the hours that are not billed yet and not excluded from billing (Open + Sent for Review + Billable).';
                 }
                 field("Open Hours"; Rec."Open Hours")
                 {
@@ -161,7 +161,7 @@ page 50102 "BCJ Jira Billing Overview"
                 }
                 field("Sent for Review Hours"; Rec."Sent for Review Hours")
                 {
-                    ToolTip = 'Specifies the hours sent to the customer and waiting for an answer. Choose the value to open the customer review.';
+                    ToolTip = 'Specifies the hours sent to the customer and waiting for an answer: the Hours to Bill of the customer review, not everything logged. Choose the value to open the customer review.';
 
                     trigger OnDrillDown()
                     begin
@@ -174,7 +174,7 @@ page 50102 "BCJ Jira Billing Overview"
                 }
                 field("Not Billable Hours"; Rec."Not Billable Hours")
                 {
-                    ToolTip = 'Specifies the hours marked as not billable, including the part of partly approved entries that the customer did not approve.';
+                    ToolTip = 'Specifies the hours marked as not billable, including the part of partly approved entries that the customer did not approve and the hours left out of Hours to Bill on a customer review that waits for an answer.';
                 }
                 field("Billed Hours"; Rec."Billed Hours")
                 {

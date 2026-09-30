@@ -1311,6 +1311,357 @@ codeunit 50154 "BCJ Customer Review Tests"
     end;
 
     // ---------------------------------------------------------------------------------
+    // Overview hours - Sent for Review follows the review line's Hours to Bill
+    // (regression: lowering Hours to Bill left the overview showing the full logged hours as
+    // Sent for Review, overstating what is being asked from the customer)
+    // ---------------------------------------------------------------------------------
+
+    [Test]
+    procedure Overview_SentForReviewFollowsLoweredHoursToBill()
+    var
+        Buffer: Record "BCJ Billing Overview Buffer" temporary;
+        TimeEntryFilter: Record "BCJ Project Time Entry";
+        Review: Record "BCJ Customer Review";
+        CustomerNo: Code[20];
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] The business case behind the bug: 10 hours were logged, the consultant
+        // decided to charge only half and set 50% on the review. From that moment the customer is
+        // being asked for 5 hours, not 10 - so "Sent for Review" must show 5, the 5 hours the
+        // consultant chose not to charge must show as Not Billable (they were worked and will
+        // never be invoiced), and Unbilled must drop to 5. Showing 10 overstates the expected
+        // revenue by exactly the discount the consultant just gave. Total stays the hours worked.
+        // [GIVEN] A task with 6 h (older) and 4 h (newer) sent for review, 50% asked for
+        Initialize();
+        CustomerNo := CreateCustomer('C');
+        JobNo := CreateProject('P1', CustomerNo);
+        CreateTask(JobNo, 'T1');
+        AddEntry('OLD', JobNo, 'T1', D(), 6, "BCJ Billing Status"::Open);
+        AddEntry('NEW', JobNo, 'T1', D() + 1, 4, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        CustomerReviewMgt.SetHoursToBillPct(Review, 50);
+        // [WHEN] The overview is built
+        FilterOwnProjects(TimeEntryFilter);
+        OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, false);
+        // [THEN] Task, project and customer: Total 10, Sent for Review 5, Not Billable 5, Unbilled 5
+        FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T1');
+        AssertHours(Buffer, 10, 0, 5, 0, 5, 0, 5, 'Task whose review asks for 50% of 10 logged hours');
+        FindLine(Buffer, LineType::Project, CustomerNo, JobNo, '');
+        AssertHours(Buffer, 10, 0, 5, 0, 5, 0, 5, 'Project whose review asks for 50% of 10 logged hours');
+        FindLine(Buffer, LineType::Customer, CustomerNo, '', '');
+        AssertHours(Buffer, 10, 0, 5, 0, 5, 0, 5, 'Customer whose review asks for 50% of 10 logged hours');
+        AssertBucketsBalanceOnEveryLine(Buffer);
+    end;
+
+    [Test]
+    procedure Overview_SentForReviewTimeEntryRowsCarryOldestFirstShare()
+    var
+        Buffer: Record "BCJ Billing Overview Buffer" temporary;
+        TimeEntryFilter: Record "BCJ Project Time Entry";
+        Review: Record "BCJ Customer Review";
+        CustomerNo: Code[20];
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] Hours to Bill is a per-task number, but the overview can show individual
+        // worklogs. The per-worklog split must be the one the approval will later produce - oldest
+        // first, each worklog capped at its own logged hours (see
+        // SetHoursToBillPct_FiftyPercentEndToEnd: the 6-hour entry carries all 5, the 4-hour one
+        // is written off). Any other split would show the consultant one picture before the
+        // customer answers and a different one after, for the same numbers.
+        // [GIVEN] A task with 6 h (older) and 4 h (newer) sent for review, 50% asked for
+        Initialize();
+        CustomerNo := CreateCustomer('C');
+        JobNo := CreateProject('P1', CustomerNo);
+        CreateTask(JobNo, 'T1');
+        AddEntry('OLD', JobNo, 'T1', D(), 6, "BCJ Billing Status"::Open);
+        AddEntry('NEW', JobNo, 'T1', D() + 1, 4, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        CustomerReviewMgt.SetHoursToBillPct(Review, 50);
+        // [WHEN] The overview is built down to the worklogs
+        FilterOwnProjects(TimeEntryFilter);
+        OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, true);
+        // [THEN] The older worklog carries all 5 requested hours, its remaining 1 is not billable
+        FindEntryLine(Buffer, 'OLD');
+        AssertHours(Buffer, 6, 0, 5, 0, 1, 0, 5, 'Older worklog of a task asking for 5 of 10 hours');
+        Assert.AreEqual(5.0, Buffer."Allocated Hours", 'The older worklog must show the 5 requested hours as its allocated share, because it is filled first');
+        // [THEN] The newer worklog gets nothing of the request and is entirely not billable
+        FindEntryLine(Buffer, 'NEW');
+        AssertHours(Buffer, 4, 0, 0, 0, 4, 0, 0, 'Newer worklog of a task asking for 5 of 10 hours');
+        Assert.AreEqual(0.0, Buffer."Allocated Hours", 'The newer worklog must show no allocated share, because the older one already absorbed the whole request');
+        AssertBucketsBalanceOnEveryLine(Buffer);
+    end;
+
+    [Test]
+    procedure Overview_SentForReviewShareSpillsIntoNewerEntry()
+    var
+        Buffer: Record "BCJ Billing Overview Buffer" temporary;
+        TimeEntryFilter: Record "BCJ Project Time Entry";
+        Review: Record "BCJ Customer Review";
+        CustomerNo: Code[20];
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] When the request is larger than the oldest worklog, that worklog is capped
+        // at its own logged hours and the rest spills into the next one - no worklog may ever be
+        // shown as asked for more than it logs, and none of the request may disappear.
+        // [GIVEN] A task with 6 h (older) and 4 h (newer) sent for review, 7 hours asked for
+        Initialize();
+        CustomerNo := CreateCustomer('C');
+        JobNo := CreateProject('P1', CustomerNo);
+        CreateTask(JobNo, 'T1');
+        AddEntry('OLD', JobNo, 'T1', D(), 6, "BCJ Billing Status"::Open);
+        AddEntry('NEW', JobNo, 'T1', D() + 1, 4, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        SetHoursToBill(Review."Review No.", 'T1', 7);
+        // [WHEN] The overview is built down to the worklogs
+        FilterOwnProjects(TimeEntryFilter);
+        OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, true);
+        // [THEN] Older 6 / 0, newer 1 / 3, task 7 / 3
+        FindEntryLine(Buffer, 'OLD');
+        AssertHours(Buffer, 6, 0, 6, 0, 0, 0, 6, 'Older worklog of a task asking for 7 of 10 hours');
+        Assert.AreEqual(6.0, Buffer."Allocated Hours", 'The older worklog must be filled up to its own logged hours and no further');
+        FindEntryLine(Buffer, 'NEW');
+        AssertHours(Buffer, 4, 0, 1, 0, 3, 0, 1, 'Newer worklog of a task asking for 7 of 10 hours');
+        Assert.AreEqual(1.0, Buffer."Allocated Hours", 'The newer worklog must carry exactly what the older one could not');
+        FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T1');
+        AssertHours(Buffer, 10, 0, 7, 0, 3, 0, 7, 'Task asking for 7 of 10 hours');
+    end;
+
+    [Test]
+    procedure Overview_SentForReviewSamePostingDateSplitsInJiraIdOrder()
+    var
+        Buffer: Record "BCJ Billing Overview Buffer" temporary;
+        TimeEntryFilter: Record "BCJ Project Time Entry";
+        Review: Record "BCJ Customer Review";
+        CustomerNo: Code[20];
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] Worklogs on the same day are the common case. The approval breaks that tie
+        // on Jira ID (SubmitReview_SamePostingDateAllocatesInJiraIdOrder), so the overview must
+        // too - otherwise the worklog shown as carrying the request is not the one that will be
+        // billed when the customer approves it.
+        // [GIVEN] Two 3-hour worklogs on the same day, 4 hours asked for
+        Initialize();
+        CustomerNo := CreateCustomer('C');
+        JobNo := CreateProject('P1', CustomerNo);
+        CreateTask(JobNo, 'T1');
+        AddEntry('A', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
+        AddEntry('B', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        SetHoursToBill(Review."Review No.", 'T1', 4);
+        // [WHEN] The overview is built down to the worklogs
+        FilterOwnProjects(TimeEntryFilter);
+        OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, true);
+        // [THEN] The lower Jira ID is filled first
+        FindEntryLine(Buffer, 'A');
+        AssertHours(Buffer, 3, 0, 3, 0, 0, 0, 3, 'Lower Jira ID worklog on a shared posting date');
+        Assert.AreEqual(3.0, Buffer."Allocated Hours", 'On equal posting dates the lower Jira ID must be filled first');
+        FindEntryLine(Buffer, 'B');
+        AssertHours(Buffer, 3, 0, 1, 0, 2, 0, 1, 'Higher Jira ID worklog on a shared posting date');
+        Assert.AreEqual(1.0, Buffer."Allocated Hours", 'On equal posting dates the higher Jira ID must carry only the remainder');
+    end;
+
+    [Test]
+    procedure Overview_SentForReviewZeroHoursToBillIsAllNotBillable()
+    var
+        Buffer: Record "BCJ Billing Overview Buffer" temporary;
+        TimeEntryFilter: Record "BCJ Project Time Entry";
+        Review: Record "BCJ Customer Review";
+        CustomerNo: Code[20];
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] A goodwill task: the consultant asks the customer for nothing. None of those
+        // hours will ever be invoiced, so none of them may sit in Sent for Review or Unbilled -
+        // the whole task is Not Billable already while the review is out.
+        // [GIVEN] A task with 6 h and 4 h sent for review, 0 hours asked for
+        Initialize();
+        CustomerNo := CreateCustomer('C');
+        JobNo := CreateProject('P1', CustomerNo);
+        CreateTask(JobNo, 'T1');
+        AddEntry('OLD', JobNo, 'T1', D(), 6, "BCJ Billing Status"::Open);
+        AddEntry('NEW', JobNo, 'T1', D() + 1, 4, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        SetHoursToBill(Review."Review No.", 'T1', 0);
+        // [WHEN] The overview is built down to the worklogs
+        FilterOwnProjects(TimeEntryFilter);
+        OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, true);
+        // [THEN] Everything is Not Billable, nothing Sent for Review, nothing Unbilled
+        FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T1');
+        AssertHours(Buffer, 10, 0, 0, 0, 10, 0, 0, 'Task whose review asks for 0 hours');
+        FindLine(Buffer, LineType::Customer, CustomerNo, '', '');
+        AssertHours(Buffer, 10, 0, 0, 0, 10, 0, 0, 'Customer whose only review asks for 0 hours');
+        FindEntryLine(Buffer, 'OLD');
+        AssertHours(Buffer, 6, 0, 0, 0, 6, 0, 0, 'Older worklog of a task asking for 0 hours');
+        Assert.AreEqual(0.0, Buffer."Allocated Hours", 'A worklog of a task asking for 0 hours must show no allocated share');
+        FindEntryLine(Buffer, 'NEW');
+        AssertHours(Buffer, 4, 0, 0, 0, 4, 0, 0, 'Newer worklog of a task asking for 0 hours');
+        Assert.AreEqual(0.0, Buffer."Allocated Hours", 'A worklog of a task asking for 0 hours must show no allocated share');
+    end;
+
+    [Test]
+    procedure Overview_SentForReviewShareIgnoresPostingDateFilter()
+    var
+        Buffer: Record "BCJ Billing Overview Buffer" temporary;
+        TimeEntryFilter: Record "BCJ Project Time Entry";
+        Review: Record "BCJ Customer Review";
+        CustomerNo: Code[20];
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] The request belongs to the whole review line, not to whatever period the
+        // consultant happens to be looking at. A worklog's share must be the same whether the
+        // overview shows the whole review or one day of it - if a date filter re-spread the
+        // request over only the visible worklogs, the same 5 requested hours would be counted
+        // once in each period and the periods together would promise more than was asked.
+        // [GIVEN] A task with 6 h (older, day D) and 4 h (newer, day D+1) sent for review, 50% asked for
+        Initialize();
+        CustomerNo := CreateCustomer('C');
+        JobNo := CreateProject('P1', CustomerNo);
+        CreateTask(JobNo, 'T1');
+        AddEntry('OLD', JobNo, 'T1', D(), 6, "BCJ Billing Status"::Open);
+        AddEntry('NEW', JobNo, 'T1', D() + 1, 4, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        CustomerReviewMgt.SetHoursToBillPct(Review, 50);
+        // [WHEN] The overview is built for day D only
+        FilterOwnProjects(TimeEntryFilter);
+        TimeEntryFilter.SetRange("Posting Date", D());
+        OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, true);
+        // [THEN] The older worklog shows its own share of the whole line: 5 / 1
+        FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T1');
+        AssertHours(Buffer, 6, 0, 5, 0, 1, 0, 5, 'Task filtered to the day of the older worklog');
+        FindEntryLine(Buffer, 'OLD');
+        Assert.AreEqual(5.0, Buffer."Allocated Hours", 'The older worklog must keep its share of the whole review line under a date filter');
+        // [WHEN] The overview is built for day D+1 only
+        Buffer.Reset();
+        Buffer.DeleteAll();
+        FilterOwnProjects(TimeEntryFilter);
+        TimeEntryFilter.SetRange("Posting Date", D() + 1);
+        OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, true);
+        // [THEN] The newer worklog shows its own share of the whole line, 0 - not the 4 a
+        // re-spread of the 5 requested hours over the visible worklog alone would give
+        FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T1');
+        AssertHours(Buffer, 4, 0, 0, 0, 4, 0, 0, 'Task filtered to the day of the newer worklog');
+        FindEntryLine(Buffer, 'NEW');
+        Assert.AreEqual(0.0, Buffer."Allocated Hours", 'The newer worklog must keep its share of the whole review line under a date filter, not a share recomputed over the visible worklogs');
+    end;
+
+    [Test]
+    procedure Overview_SentForReviewLoweringOneTaskLeavesOtherTaskAlone()
+    var
+        Buffer: Record "BCJ Billing Overview Buffer" temporary;
+        TimeEntryFilter: Record "BCJ Project Time Entry";
+        Review: Record "BCJ Customer Review";
+        CustomerNo: Code[20];
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] Hours to Bill is decided per task: cutting one task is a decision about that
+        // task only. The other task of the same review is still asked for in full, and the
+        // customer and project rows must add the two up correctly - the cut must neither leak
+        // into the other task nor be lost on the way up the tree.
+        // [GIVEN] One review over T1 (6 h + 4 h, 5 asked for) and T2 (3 h, asked for in full)
+        Initialize();
+        CustomerNo := CreateCustomer('C');
+        JobNo := CreateProject('P1', CustomerNo);
+        CreateTask(JobNo, 'T1');
+        CreateTask(JobNo, 'T2');
+        AddEntry('OLD', JobNo, 'T1', D(), 6, "BCJ Billing Status"::Open);
+        AddEntry('NEW', JobNo, 'T1', D() + 1, 4, "BCJ Billing Status"::Open);
+        AddEntry('OTHER', JobNo, 'T2', D(), 3, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        SetHoursToBill(Review."Review No.", 'T1', 5);
+        // [WHEN] The overview is built down to the worklogs
+        FilterOwnProjects(TimeEntryFilter);
+        OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, true);
+        // [THEN] T1 is cut, T2 is untouched, and project and customer add both up
+        FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T1');
+        AssertHours(Buffer, 10, 0, 5, 0, 5, 0, 5, 'Task T1 asking for 5 of 10 hours');
+        FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T2');
+        AssertHours(Buffer, 3, 0, 3, 0, 0, 0, 3, 'Task T2 asked for in full next to a cut task');
+        FindEntryLine(Buffer, 'OTHER');
+        Assert.AreEqual(3.0, Buffer."Allocated Hours", 'A worklog of a task asked for in full must show all of its hours as allocated');
+        FindLine(Buffer, LineType::Project, CustomerNo, JobNo, '');
+        AssertHours(Buffer, 13, 0, 8, 0, 5, 0, 8, 'Project with one cut task and one full task');
+        FindLine(Buffer, LineType::Customer, CustomerNo, '', '');
+        AssertHours(Buffer, 13, 0, 8, 0, 5, 0, 8, 'Customer with one cut task and one full task');
+        AssertBucketsBalanceOnEveryLine(Buffer);
+    end;
+
+    [Test]
+    procedure Overview_SentForReviewWithoutReviewLineKeepsFullHours()
+    var
+        Buffer: Record "BCJ Billing Overview Buffer" temporary;
+        TimeEntryFilter: Record "BCJ Project Time Entry";
+        Review: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        CustomerNo: Code[20];
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] An entry can be in "Sent for Review" without a review line to read the
+        // request from - legacy data with no Review No., or a line that has gone missing. With
+        // no request to go by, nothing may be written off in the overview: the full logged hours
+        // stay in Sent for Review, as before the fix. The lookup must also be keyed on review
+        // AND task, so a cut on another task of the same review must not be applied here.
+        // [GIVEN] One review over T1 (4 h, 0 asked for) and T2 (3 h) whose T2 line is then deleted
+        Initialize();
+        CustomerNo := CreateCustomer('C');
+        JobNo := CreateProject('P1', CustomerNo);
+        CreateTask(JobNo, 'T1');
+        CreateTask(JobNo, 'T2');
+        CreateTask(JobNo, 'T3');
+        AddEntry('CUT', JobNo, 'T1', D(), 4, "BCJ Billing Status"::Open);
+        AddEntry('NOLINE', JobNo, 'T2', D(), 3, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        SetHoursToBill(Review."Review No.", 'T1', 0);
+        ReviewLine.Get(Review."Review No.", 'T2');
+        ReviewLine.Delete(false);
+        // [GIVEN] And a T3 entry of 2 h that is Sent for Review with no Review No. at all
+        AddEntry('NOREVIEW', JobNo, 'T3', D(), 2, "BCJ Billing Status"::"Sent for Review");
+        // [WHEN] The overview is built down to the worklogs
+        FilterOwnProjects(TimeEntryFilter);
+        OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, true);
+        // [THEN] T1 follows its line, T2 and T3 keep all their hours in Sent for Review
+        FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T1');
+        AssertHours(Buffer, 4, 0, 0, 0, 4, 0, 0, 'Task T1 whose review line asks for 0 hours');
+        FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T2');
+        AssertHours(Buffer, 3, 0, 3, 0, 0, 0, 3, 'Task T2 whose review line is missing');
+        FindEntryLine(Buffer, 'NOLINE');
+        AssertHours(Buffer, 3, 0, 3, 0, 0, 0, 3, 'Worklog whose review line is missing');
+        FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T3');
+        AssertHours(Buffer, 2, 0, 2, 0, 0, 0, 2, 'Task T3 whose entry is Sent for Review without a Review No.');
+        FindEntryLine(Buffer, 'NOREVIEW');
+        AssertHours(Buffer, 2, 0, 2, 0, 0, 0, 2, 'Worklog Sent for Review without a Review No.');
+        FindLine(Buffer, LineType::Customer, CustomerNo, '', '');
+        AssertHours(Buffer, 9, 0, 5, 0, 4, 0, 5, 'Customer with a cut task, a task without review line and a task without review');
+        AssertBucketsBalanceOnEveryLine(Buffer);
+    end;
+
+    local procedure FindEntryLine(var Buffer: Record "BCJ Billing Overview Buffer" temporary; Suffix: Text)
+    begin
+        Buffer.Reset();
+        Buffer.SetRange("Line Type", LineType::"Time Entry");
+        Buffer.SetRange("Jira ID", JiraId(Suffix));
+        Assert.AreEqual(1, Buffer.Count(), StrSubstNo('Exactly one time entry line must exist for worklog %1', JiraId(Suffix)));
+        Buffer.FindFirst();
+    end;
+
+    local procedure AssertBucketsBalanceOnEveryLine(var Buffer: Record "BCJ Billing Overview Buffer" temporary)
+    var
+        LineName: Text;
+    begin
+        Buffer.Reset();
+        Buffer.FindSet();
+        repeat
+            LineName := StrSubstNo('%1 line %2 %3 %4 %5', Buffer."Line Type", Buffer."Customer No.", Buffer."Project No.", Buffer."Project Task No.", Buffer."Jira ID");
+            Assert.AreEqual(
+              Buffer."Total Hours",
+              Buffer."Open Hours" + Buffer."Sent for Review Hours" + Buffer."Billable Hours" + Buffer."Not Billable Hours" + Buffer."Billed Hours",
+              LineName + ': every logged hour must sit in exactly one bucket, so the five buckets must add up to Total Hours');
+            Assert.AreEqual(
+              Buffer."Unbilled Hours",
+              Buffer."Open Hours" + Buffer."Sent for Review Hours" + Buffer."Billable Hours",
+              LineName + ': Unbilled Hours must be everything not yet invoiced and not written off');
+        until Buffer.Next() = 0;
+    end;
+
+    // ---------------------------------------------------------------------------------
     // GetOpenReviews
     // ---------------------------------------------------------------------------------
 
