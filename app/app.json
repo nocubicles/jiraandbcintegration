@@ -6,7 +6,7 @@
   "runtime": "12.1",
   "target": "Cloud",
   "application": "23.0.0.0",
-  "platform": "28.0.54389.0",
+  "platform": "23.0.0.0",
   "resourceExposurePolicy": {
     "allowDebugging": true,
     "allowDownloadingSource": true,
