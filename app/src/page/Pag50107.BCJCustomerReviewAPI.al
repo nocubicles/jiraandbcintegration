@@ -9,6 +9,8 @@ page 50107 "BCJ Customer Review API"
     EntityCaption = 'Customer Review';
     EntitySetCaption = 'Customer Reviews';
     SourceTable = "BCJ Customer Review";
+    // A draft is not with the customer yet: its link is not valid.
+    SourceTableView = where(Status = filter(<> Draft));
     ODataKeyFields = SystemId;
     DelayedInsert = true;
     InsertAllowed = false;

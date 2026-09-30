@@ -64,11 +64,27 @@ page 50103 "BCJ Jira Time Entry Worksheet"
                 field("Billing Status"; Rec."Billing Status")
                 {
                     StyleExpr = StatusStyle;
-                    ToolTip = 'Specifies whether the time entry is open (not reviewed), sent for customer review, billable, not billable or billed.';
+                    ToolTip = 'Specifies what the time entry needs next: hours in review, open hours, hours to bill, or billed / not billable when nothing else is left. The hour columns show how its logged hours are split.';
+                }
+                field("Open Hours"; Rec."Open Hours")
+                {
+                    ToolTip = 'Specifies the unbilled hours that are free: not in a review, not approved and not written off.';
+                }
+                field("In Review Hours"; Rec."In Review Hours")
+                {
+                    ToolTip = 'Specifies the hours reserved in a draft customer review or waiting for the customer''s answer.';
                 }
                 field("Billable Hours"; Rec."Billable Hours")
                 {
-                    ToolTip = 'Specifies the hours to bill for this entry. Equal to the logged hours unless the customer approved only part of the hours of the task.';
+                    ToolTip = 'Specifies the hours approved, by the customer or by you, and waiting to be billed.';
+                }
+                field("Billed Hours"; Rec."Billed Hours")
+                {
+                    ToolTip = 'Specifies the hours already billed.';
+                }
+                field("Not Billable Hours"; Rec."Not Billable Hours")
+                {
+                    ToolTip = 'Specifies the hours written off.';
                 }
                 field("Review No."; Rec."Review No.")
                 {
@@ -125,7 +141,7 @@ page 50103 "BCJ Jira Time Entry Worksheet"
                 {
                     Caption = 'Open';
                     Image = ReOpen;
-                    ToolTip = 'Reset the selected time entries to open (not reviewed).';
+                    ToolTip = 'Undo your own decisions on the selected time entries: billed hours go back to billable, otherwise hours you marked billable or not billable go back to open. Hours approved in a customer review are taken back only by reopening the review.';
 
                     trigger OnAction()
                     begin
@@ -171,22 +187,22 @@ page 50103 "BCJ Jira Time Entry Worksheet"
         view(Unbilled)
         {
             Caption = 'Unbilled';
-            Filters = where("Billing Status" = filter(Open | "Sent for Review" | Billable));
+            Filters = where("Unbilled Hours" = filter(<> 0));
         }
         view(InReview)
         {
-            Caption = 'Sent for Review';
-            Filters = where("Billing Status" = const("Sent for Review"));
+            Caption = 'In Review';
+            Filters = where("In Review Hours" = filter(<> 0));
         }
         view(OpenEntries)
         {
             Caption = 'To Review';
-            Filters = where("Billing Status" = const(Open));
+            Filters = where("Open Hours" = filter(<> 0));
         }
         view(BillableEntries)
         {
             Caption = 'Ready to Bill';
-            Filters = where("Billing Status" = const(Billable));
+            Filters = where("Billable Hours" = filter(<> 0));
         }
     }
 
@@ -209,16 +225,25 @@ page 50103 "BCJ Jira Time Entry Worksheet"
     var
         StatusStyle: Text;
         EntriesUpdatedMsg: Label '%1 time entries updated.', Comment = '%1 = number of time entries';
-        EntriesInReviewMsg: Label '%1 time entries were not changed because they are waiting for a customer answer.', Comment = '%1 = number of time entries';
+        EntriesInReviewMsg: Label '%1 time entries have hours in a customer review; those hours were not changed.', Comment = '%1 = number of time entries';
+        UnbillQst: Label '%1 of the selected time entries have billed hours. Open takes their billed hours back to Billable. Continue?', Comment = '%1 = number of time entries with billed hours';
 
     local procedure SetStatusForSelection(NewStatus: Enum "BCJ Billing Status")
     var
         TimeEntry: Record "BCJ Project Time Entry";
+        BilledEntry: Record "BCJ Project Time Entry";
         BillingMgt: Codeunit "BCJ Billing Mgt.";
         ChangedCount: Integer;
         InReviewCount: Integer;
     begin
         CurrPage.SetSelectionFilter(TimeEntry);
+        if NewStatus = NewStatus::Open then begin
+            BilledEntry.CopyFilters(TimeEntry);
+            BilledEntry.SetFilter("Billed Hours", '<>0');
+            if not BilledEntry.IsEmpty() then
+                if not Confirm(UnbillQst, false, BilledEntry.Count()) then
+                    exit;
+        end;
         ChangedCount := BillingMgt.SetBillingStatus(TimeEntry, NewStatus);
         InReviewCount := BillingMgt.CountEntriesInReview(TimeEntry);
         CurrPage.Update(false);

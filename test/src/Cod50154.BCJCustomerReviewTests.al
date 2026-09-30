@@ -3,11 +3,16 @@ codeunit 50154 "BCJ Customer Review Tests"
     Subtype = Test;
     TestPermissions = Disabled;
 
-    // Customer time review: the consultant sends a project's open hours to the customer, the
-    // customer approves a number of hours per task, and the approved hours are allocated back
-    // onto the individual worklog entries. Money changes hands on the result, so every number
-    // asserted here is a business decision recorded in tasks/customer-review-contract.md, not an
-    // implementation detail.
+    // Customer time review: the consultant reserves a project's Open hours in a Draft review,
+    // lowers Hours to Bill per task, sends it, the customer approves a number of hours per task,
+    // and the approved hours are allocated back onto the individual worklogs. Money changes
+    // hands on the result, so every number asserted here is a business decision recorded in
+    // tasks/hour-allocation-contract.md (v1.2.0.0), not an implementation detail.
+    //
+    // Hour buckets per worklog: Open / In Review / Billable / Billed / Not Billable, always
+    // adding up to the logged hours. Allocation inside a task is always oldest first (Posting
+    // Date, then Jira ID): older hours are kept in review / approved first, the newest go back
+    // to Open.
     //
     // All fixture keys derive from a fresh GUID stem, so these tests never touch real synced
     // Jira data in the sandbox and never collide with each other. Nothing is cached between
@@ -25,7 +30,7 @@ codeunit 50154 "BCJ Customer Review Tests"
         Stem: Code[13];
 
     // ---------------------------------------------------------------------------------
-    // CreateReviews
+    // CreateReviews - Draft reviews reserve Open hours
     // ---------------------------------------------------------------------------------
 
     [Test]
@@ -39,11 +44,10 @@ codeunit 50154 "BCJ Customer Review Tests"
         JobNo: Code[20];
         Created: Integer;
     begin
-        // [SCENARIO] The customer is asked to approve a project, not a worklog: one mail per
-        // project, and inside it one row per task - a customer cannot judge individual Jira
-        // worklogs but does recognise the task they ordered. The hours shown per task must be
-        // the sum of the hours actually sent, and each entry sent must be parked in
-        // "Sent for Review" so it can no longer be invoiced or re-sent while the customer decides.
+        // [SCENARIO] The customer is asked to approve a project, not a worklog: one review per
+        // project, one line per task. Creating it makes a Draft (business flow step 2) that the
+        // consultant can still adjust before anything reaches the customer, and it reserves the
+        // Open hours (In Review) so the same hours cannot go into a second review meanwhile.
         // [GIVEN] One project with two tasks and three open entries
         Initialize();
         CustomerNo := CreateCustomer('C');
@@ -53,30 +57,32 @@ codeunit 50154 "BCJ Customer Review Tests"
         AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
         AddEntry('E2', JobNo, 'T1', D() + 1, 1, "BCJ Billing Status"::Open);
         AddEntry('E3', JobNo, 'T2', D(), 3, "BCJ Billing Status"::Open);
-        // [WHEN] The whole project is sent for review
+        // [WHEN] The whole project is put in a review
         FilterOwnProjects(TimeEntry);
         Created := CustomerReviewMgt.CreateReviews(TimeEntry, TempReview);
-        // [THEN] Exactly one review, one line per task, hours summed per task
+        // [THEN] Exactly one Draft review, one line per task, hours summed per task
         Assert.AreEqual(1, Created, 'Open entries of one project must produce exactly one review, not one per task or per entry');
         Assert.AreEqual(1, TempReview.Count(), 'The returned temporary buffer must hold one header per review created');
         TempReview.FindFirst();
         Review.Get(TempReview."Review No.");
-        Assert.AreEqual("BCJ Review Status"::Sent, Review.Status, 'A newly created review must be Sent, waiting for the customer');
+        Assert.AreEqual("BCJ Review Status"::Draft, Review.Status, 'A newly created review must be a Draft - nothing reaches the customer until it is sent');
         Assert.AreEqual(JobNo, Review."Project No.", 'The review must belong to the project its entries came from');
         Assert.AreEqual(CustomerNo, Review."Customer No.", 'The review must snapshot the project Bill-to customer, so a later change of Bill-to does not rewrite history');
         ReviewLine.SetRange("Review No.", Review."Review No.");
-        Assert.AreEqual(2, ReviewLine.Count(), 'A review must have exactly one line per task that had entries sent');
+        Assert.AreEqual(2, ReviewLine.Count(), 'A review must have exactly one line per task that had hours reserved');
         ReviewLine.Get(Review."Review No.", 'T1');
-        Assert.AreEqual(3.0, ReviewLine."Logged Hours", 'Task T1 must show the sum of the hours of both entries sent for it');
-        Assert.AreEqual(2, ReviewLine."Entry Count", 'Task T1 must record that two entries were sent');
+        Assert.AreEqual(3.0, ReviewLine."Logged Hours", 'Task T1 must show the hours reserved from both of its entries');
+        Assert.AreEqual(3.0, ReviewLine."Hours to Bill", 'Hours to Bill must start at the hours reserved on the task');
         Assert.AreEqual(TaskDescription(JobNo, 'T1'), ReviewLine."Task Description", 'The line must carry the task description the customer recognises');
         ReviewLine.Get(Review."Review No.", 'T2');
-        Assert.AreEqual(3.0, ReviewLine."Logged Hours", 'Task T2 must show the hours of the single entry sent for it');
-        Assert.AreEqual(1, ReviewLine."Entry Count", 'Task T2 must record that one entry was sent');
-        // [THEN] Every entry sent is parked in the review with its full hours still allocated
-        AssertEntry('E1', "BCJ Billing Status"::"Sent for Review", 2, Review."Review No.", 'Entry E1 must be parked in the review with its logged hours still fully allocated');
-        AssertEntry('E2', "BCJ Billing Status"::"Sent for Review", 1, Review."Review No.", 'Entry E2 must be parked in the review with its logged hours still fully allocated');
-        AssertEntry('E3', "BCJ Billing Status"::"Sent for Review", 3, Review."Review No.", 'Entry E3 must be parked in the review with its logged hours still fully allocated');
+        Assert.AreEqual(3.0, ReviewLine."Logged Hours", 'Task T2 must show the hours of the single entry reserved for it');
+        // [THEN] Every hour is reserved in this review
+        AssertBuckets('E1', 0, 2, 0, 0, 0, 'Entry E1 must have all its Open hours reserved');
+        AssertBuckets('E2', 0, 1, 0, 0, 0, 'Entry E2 must have all its Open hours reserved');
+        AssertBuckets('E3', 0, 3, 0, 0, 0, 'Entry E3 must have all its Open hours reserved');
+        BCJTestLibrary.AssertRow(JiraId('E1'), Review."Review No.", 2, 0, 0, 0, 'The reserved hours of E1 must sit on the row of this review');
+        AssertStatus('E1', "BCJ Billing Status"::"Sent for Review", 'An entry with hours in review must show Sent for Review');
+        AssertOwnInvariant('After CreateReviews');
     end;
 
     [Test]
@@ -91,10 +97,9 @@ codeunit 50154 "BCJ Customer Review Tests"
         JobB: Code[20];
         Created: Integer;
     begin
-        // [SCENARIO] A consultant selects a whole customer in the overview and sends it. Each
-        // project is a separate agreement with its own budget, so it gets its own review and its
-        // own mail - one combined mail would make the customer approve hours across projects that
-        // may be invoiced separately and at different rates.
+        // [SCENARIO] A consultant selects a whole customer in the overview. Each project is a
+        // separate agreement with its own budget, so it gets its own review - one combined review
+        // would make the customer approve hours across projects that may be invoiced separately.
         // [GIVEN] Two projects of one customer, each with open entries
         Initialize();
         CustomerNo := CreateCustomer('C');
@@ -105,22 +110,22 @@ codeunit 50154 "BCJ Customer Review Tests"
         AddEntry('A1', JobA, 'T1', D(), 2, "BCJ Billing Status"::Open);
         AddEntry('A2', JobA, 'T1', D(), 1, "BCJ Billing Status"::Open);
         AddEntry('B1', JobB, 'T1', D(), 4, "BCJ Billing Status"::Open);
-        // [WHEN] Both projects are sent in one call
+        // [WHEN] Both projects are put in review in one call
         FilterOwnProjects(TimeEntry);
         Created := CustomerReviewMgt.CreateReviews(TimeEntry, TempReview);
-        // [THEN] Two reviews, one per project, each holding only its own entries
+        // [THEN] Two reviews, one per project, each holding only its own hours
         Assert.AreEqual(2, Created, 'A selection spanning two projects must produce one review per project');
         Assert.AreEqual(2, TempReview.Count(), 'The returned temporary buffer must hold both review headers');
         GetReviewOfProject(JobA, ReviewA);
         GetReviewOfProject(JobB, ReviewB);
         Assert.AreNotEqual(ReviewA."Review No.", ReviewB."Review No.", 'The two projects must get two distinct reviews');
-        AssertEntry('A1', "BCJ Billing Status"::"Sent for Review", 2, ReviewA."Review No.", 'Entry A1 must belong to the review of its own project');
-        AssertEntry('A2', "BCJ Billing Status"::"Sent for Review", 1, ReviewA."Review No.", 'Entry A2 must belong to the review of its own project');
-        AssertEntry('B1', "BCJ Billing Status"::"Sent for Review", 4, ReviewB."Review No.", 'Entry B1 must belong to the review of its own project');
+        BCJTestLibrary.AssertRow(JiraId('A1'), ReviewA."Review No.", 2, 0, 0, 0, 'Entry A1 must be reserved in the review of its own project');
+        BCJTestLibrary.AssertRow(JiraId('A2'), ReviewA."Review No.", 1, 0, 0, 0, 'Entry A2 must be reserved in the review of its own project');
+        BCJTestLibrary.AssertRow(JiraId('B1'), ReviewB."Review No.", 4, 0, 0, 0, 'Entry B1 must be reserved in the review of its own project');
     end;
 
     [Test]
-    procedure CreateReviews_TakesOnlyOpenEntries()
+    procedure CreateReviews_TakesOnlyOpenHours()
     var
         TimeEntry: Record "BCJ Project Time Entry";
         TempReview: Record "BCJ Customer Review" temporary;
@@ -129,12 +134,12 @@ codeunit 50154 "BCJ Customer Review Tests"
         JobNo: Code[20];
         Created: Integer;
     begin
-        // [SCENARIO] Only undecided (Open) hours are the customer's business. Hours already
-        // decided as Billable or Not Billable, and above all hours already invoiced (Billed),
-        // must never be re-opened for approval - the customer would be asked to approve an
-        // invoice that has already been sent. Such entries inside the selection are ignored
-        // rather than rejected, because selecting a whole task or project is the normal way to work.
-        // [GIVEN] One task holding one Open entry and one entry in each decided status
+        // [SCENARIO] Only Open hours are the customer's business. Hours already approved,
+        // written off or above all invoiced must never be put in front of the customer again -
+        // the customer would be asked to approve an invoice that has already been sent. Entries
+        // without Open hours inside the selection are skipped rather than rejected, because
+        // selecting a whole task or project is the normal way to work.
+        // [GIVEN] One task holding one Open entry and one entry in each decided state
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
@@ -142,20 +147,19 @@ codeunit 50154 "BCJ Customer Review Tests"
         AddEntry('BILLABLE', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Billable);
         AddEntry('BILLED', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Billed);
         AddEntry('NOTBILL', JobNo, 'T1', D(), 4, "BCJ Billing Status"::"Not Billable");
-        // [WHEN] The whole task is sent
+        // [WHEN] The whole task is put in review
         FilterOwnProjects(TimeEntry);
         Created := CustomerReviewMgt.CreateReviews(TimeEntry, TempReview);
         // [THEN] Only the Open hour is on the review; the decided entries are untouched
-        Assert.AreEqual(1, Created, 'A selection with at least one Open entry must create the review for that project');
+        Assert.AreEqual(1, Created, 'A selection with at least one Open hour must create the review for that project');
         TempReview.FindFirst();
         Review.Get(TempReview."Review No.");
         ReviewLine.Get(Review."Review No.", 'T1');
-        Assert.AreEqual(1.0, ReviewLine."Logged Hours", 'Only the hours of Open entries may be put in front of the customer');
-        Assert.AreEqual(1, ReviewLine."Entry Count", 'Only the Open entry may be counted as sent');
-        AssertEntry('OPEN', "BCJ Billing Status"::"Sent for Review", 1, Review."Review No.", 'The Open entry must be the one parked in the review');
-        AssertEntry('BILLABLE', "BCJ Billing Status"::Billable, 2, 0, 'An already Billable entry must stay decided and outside the review');
-        AssertEntry('BILLED', "BCJ Billing Status"::Billed, 3, 0, 'An already invoiced entry must never be sent for approval again');
-        AssertEntry('NOTBILL', "BCJ Billing Status"::"Not Billable", 4, 0, 'An explicitly Not Billable entry must stay decided and outside the review');
+        Assert.AreEqual(1.0, ReviewLine."Logged Hours", 'Only Open hours may be put in front of the customer');
+        AssertBuckets('OPEN', 0, 1, 0, 0, 0, 'The Open entry must be the one reserved in the review');
+        AssertBuckets('BILLABLE', 0, 0, 2, 0, 0, 'An already Billable entry must stay decided and outside the review');
+        AssertBuckets('BILLED', 0, 0, 0, 0, 3, 'An already invoiced entry must never be sent for approval again');
+        AssertBuckets('NOTBILL', 0, 0, 0, 4, 0, 'A written-off entry must stay decided and outside the review');
     end;
 
     [Test]
@@ -166,15 +170,15 @@ codeunit 50154 "BCJ Customer Review Tests"
         Review: Record "BCJ Customer Review";
         JobNo: Code[20];
     begin
-        // [SCENARIO] Sending a selection that holds nothing to approve must tell the consultant
-        // so, not silently create an empty review that the customer then receives a mail about.
+        // [SCENARIO] A selection that holds nothing to approve must tell the consultant so, not
+        // silently create an empty review that the customer then receives a mail about.
         // [GIVEN] A project whose entries are all already decided
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('B1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Billable);
         AddEntry('B2', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Billed);
-        // [WHEN] It is sent for review
+        // [WHEN] It is put in review
         FilterOwnProjects(TimeEntry);
         // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
         Commit();
@@ -183,8 +187,8 @@ codeunit 50154 "BCJ Customer Review Tests"
         Assert.ExpectedErrorCode('Dialog');
         Review.SetRange("Project No.", JobNo);
         Assert.IsTrue(Review.IsEmpty(), 'A selection with nothing to approve must leave no review behind');
-        AssertEntry('B1', "BCJ Billing Status"::Billable, 2, 0, 'A failed send must leave the Billable entry exactly as it was');
-        AssertEntry('B2', "BCJ Billing Status"::Billed, 3, 0, 'A failed send must leave the Billed entry exactly as it was');
+        AssertBuckets('B1', 0, 0, 2, 0, 0, 'A failed create must leave the Billable entry exactly as it was');
+        AssertBuckets('B2', 0, 0, 0, 0, 3, 'A failed create must leave the Billed entry exactly as it was');
     end;
 
     [Test]
@@ -195,17 +199,16 @@ codeunit 50154 "BCJ Customer Review Tests"
         Review: Record "BCJ Customer Review";
         JobNo: Code[20];
     begin
-        // [SCENARIO] Without a review base URL the mail would carry a link the customer cannot
-        // open, while the hours would already sit in "Sent for Review" - invisible to invoicing
-        // and unanswerable by the customer. The setup is therefore checked before anything is
-        // written, so a missing URL costs nothing but a re-run.
+        // [SCENARIO] Without a review base URL the review could never be answered, while its hours
+        // would already be reserved - invisible to invoicing. The setup is therefore checked
+        // before anything is written (contract: "Setup check before any write").
         // [GIVEN] Open entries and no review base URL configured
         Initialize();
         BCJTestLibrary.EnsureSetup('');
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
-        // [WHEN] The project is sent for review
+        // [WHEN] The project is put in review
         FilterOwnProjects(TimeEntry);
         // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
         Commit();
@@ -214,7 +217,7 @@ codeunit 50154 "BCJ Customer Review Tests"
         Assert.ExpectedErrorCode('TestField');
         Review.SetRange("Project No.", JobNo);
         Assert.IsTrue(Review.IsEmpty(), 'A missing review base URL must leave no review behind');
-        AssertEntry('E1', "BCJ Billing Status"::Open, 2, 0, 'The entry must still be Open and unreviewed after the setup check failed');
+        AssertBuckets('E1', 2, 0, 0, 0, 0, 'The entry must still be fully Open after the setup check failed');
     end;
 
     [Test]
@@ -240,7 +243,7 @@ codeunit 50154 "BCJ Customer Review Tests"
         CreateTask(JobB, 'T1');
         AddEntry('A1', JobA, 'T1', D(), 2, "BCJ Billing Status"::Open);
         AddEntry('B1', JobB, 'T1', D(), 3, "BCJ Billing Status"::Open);
-        // [WHEN] Both are sent in one call
+        // [WHEN] Both are put in review in one call
         FilterOwnProjects(TimeEntry);
         CustomerReviewMgt.CreateReviews(TimeEntry, TempReview);
         GetReviewOfProject(JobA, ReviewA);
@@ -275,10 +278,9 @@ codeunit 50154 "BCJ Customer Review Tests"
         Created: Integer;
     begin
         // [SCENARIO] In the overview the consultant can select a customer row and, in the same
-        // selection, a task row already contained in it - the tree makes that easy to do by
-        // accident. The overlap must collapse: an entry reached twice is still one entry, sent
-        // once, on one review line, counted once. Double counting would show the customer the
-        // same hours twice and double what they approve.
+        // selection, a task row already contained in it. The overlap must collapse: an entry
+        // reached twice is still one entry, reserved once, on one review line. Double counting
+        // would show the customer the same hours twice and double what they approve.
         // [GIVEN] A customer with two projects and four open entries
         Initialize();
         CustomerNo := CreateCustomer('C');
@@ -309,13 +311,12 @@ codeunit 50154 "BCJ Customer Review Tests"
         GetReviewOfProject(JobB, ReviewB);
         ReviewLine.Get(ReviewA."Review No.", 'T1');
         Assert.AreEqual(3.0, ReviewLine."Logged Hours", 'The overlapping task must show its hours once, not doubled');
-        Assert.AreEqual(2, ReviewLine."Entry Count", 'The overlapping task must count each of its two entries once');
         ReviewLine.Get(ReviewA."Review No.", 'T2');
-        Assert.AreEqual(3.0, ReviewLine."Logged Hours", 'The task reached only through the customer row must still be sent');
+        Assert.AreEqual(3.0, ReviewLine."Logged Hours", 'The task reached only through the customer row must be reserved too');
         ReviewLine.Get(ReviewB."Review No.", 'T1');
-        Assert.AreEqual(4.0, ReviewLine."Logged Hours", 'The second project of the selected customer must be sent too');
-        AssertEntry('A1', "BCJ Billing Status"::"Sent for Review", 2, ReviewA."Review No.", 'Entry A1 must be sent exactly once, on the review of its own project');
-        AssertEntry('B1', "BCJ Billing Status"::"Sent for Review", 4, ReviewB."Review No.", 'Entry B1 must be sent exactly once, on the review of its own project');
+        Assert.AreEqual(4.0, ReviewLine."Logged Hours", 'The second project of the selected customer must be reserved too');
+        AssertBuckets('A1', 0, 2, 0, 0, 0, 'Entry A1 must be reserved exactly once');
+        BCJTestLibrary.AssertRow(JiraId('B1'), ReviewB."Review No.", 4, 0, 0, 0, 'Entry B1 must be reserved exactly once, on the review of its own project');
     end;
 
     [Test]
@@ -327,17 +328,16 @@ codeunit 50154 "BCJ Customer Review Tests"
         ReviewLine: Record "BCJ Customer Review Line";
         JobNo: Code[20];
     begin
-        // [SCENARIO] Reviews are sent per billing period. An open entry outside the period the
-        // consultant filtered on belongs to the next invoice and must stay out of this review -
-        // otherwise the customer approves hours that were never meant to be in the period, and
-        // the next review has nothing left to show.
+        // [SCENARIO] Reviews are prepared per billing period. An open entry outside the period
+        // the consultant filtered on belongs to the next invoice and must stay Open - otherwise
+        // the customer approves hours that were never meant to be in the period.
         // [GIVEN] Two open entries on the same task, five days apart
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('IN', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
         AddEntry('OUT', JobNo, 'T1', D() + 5, 3, "BCJ Billing Status"::Open);
-        // [WHEN] Only the first period is sent
+        // [WHEN] Only the first period is put in review
         FilterOwnProjects(TimeEntry);
         TimeEntry.SetRange("Posting Date", D(), D() + 1);
         CustomerReviewMgt.CreateReviews(TimeEntry, TempReview);
@@ -345,10 +345,297 @@ codeunit 50154 "BCJ Customer Review Tests"
         TempReview.FindFirst();
         Review.Get(TempReview."Review No.");
         ReviewLine.Get(Review."Review No.", 'T1');
-        Assert.AreEqual(2.0, ReviewLine."Logged Hours", 'Only hours inside the posting date filter may be sent for approval');
-        Assert.AreEqual(1, ReviewLine."Entry Count", 'Only the entry inside the posting date filter may be counted as sent');
-        AssertEntry('IN', "BCJ Billing Status"::"Sent for Review", 2, Review."Review No.", 'The entry inside the filter must be parked in the review');
-        AssertEntry('OUT', "BCJ Billing Status"::Open, 3, 0, 'An open entry outside the posting date filter must stay Open and unreviewed');
+        Assert.AreEqual(2.0, ReviewLine."Logged Hours", 'Only hours inside the posting date filter may be reserved');
+        AssertBuckets('IN', 0, 2, 0, 0, 0, 'The entry inside the filter must be reserved in the review');
+        AssertBuckets('OUT', 3, 0, 0, 0, 0, 'An open entry outside the posting date filter must stay Open');
+    end;
+
+    [Test]
+    procedure CreateReviews_SecondCallExtendsExistingDraftWithOnlyNewOpenHours()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        TempReview: Record "BCJ Customer Review" temporary;
+        Review: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] Contract, CreateReviews: "one Draft review per project (hours are added to
+        // an existing Draft of that project instead of creating a second one)". The consultant
+        // who adds a late worklog to a review still being prepared gets one review, and the
+        // hours already reserved in it are not reserved a second time - the same hours cannot go
+        // into two drafts, nor twice into one.
+        // [GIVEN] A draft review holding E1 (2 h on T1)
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        CreateTask(JobNo, 'T2');
+        AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        // [GIVEN] Then E2 (3 h on T1) and E3 (1 h on T2) are synced
+        AddEntry('E2', JobNo, 'T1', D() + 1, 3, "BCJ Billing Status"::Open);
+        AddEntry('E3', JobNo, 'T2', D() + 1, 1, "BCJ Billing Status"::Open);
+        // [WHEN] The whole project is put in review again
+        FilterOwnProjects(TimeEntry);
+        Assert.AreEqual(1, CustomerReviewMgt.CreateReviews(TimeEntry, TempReview), 'Extending an existing draft must count as one review created or extended');
+        // [THEN] Still one review for the project, the same one, now with the new hours added
+        GetReviewOfProject(JobNo, Review);
+        TempReview.FindFirst();
+        Assert.AreEqual(Review."Review No.", TempReview."Review No.", 'The extended draft must be the one returned');
+        Assert.AreEqual("BCJ Review Status"::Draft, Review.Status, 'An extended review must still be a Draft');
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(5.0, ReviewLine."Logged Hours", 'Task T1 must hold the 2 hours already reserved plus the 3 new ones, not 2 twice');
+        Assert.AreEqual(5.0, ReviewLine."Hours to Bill", 'Task T1 must ask for all the hours now reserved on it');
+        ReviewLine.Get(Review."Review No.", 'T2');
+        Assert.AreEqual(1.0, ReviewLine."Logged Hours", 'A task new to the draft must get its own line in the same review');
+        BCJTestLibrary.AssertRow(JiraId('E1'), Review."Review No.", 2, 0, 0, 0, 'E1 must still be reserved once, for its 2 hours');
+        BCJTestLibrary.AssertRow(JiraId('E2'), Review."Review No.", 3, 0, 0, 0, 'E2 must be reserved in the same draft');
+        AssertBuckets('E1', 0, 2, 0, 0, 0, 'E1 must not be reserved a second time');
+        AssertOwnInvariant('After extending a draft');
+    end;
+
+    [Test]
+    procedure CreateReviews_SecondCallWithNothingNewOpenErrors()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        TempReview: Record "BCJ Customer Review" temporary;
+        Review: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] Hours already reserved in a draft are not Open, so selecting them again
+        // selects nothing to approve - the consultant must be told, and the existing draft must
+        // stay exactly as it was (no doubled line).
+        // [GIVEN] A draft review holding all Open hours of the project
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        // [WHEN] The same project is put in review again
+        FilterOwnProjects(TimeEntry);
+        // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
+        Commit();
+        asserterror CustomerReviewMgt.CreateReviews(TimeEntry, TempReview);
+        // [THEN] A plain error, and the draft is unchanged
+        Assert.ExpectedErrorCode('Dialog');
+        GetReviewOfProject(JobNo, Review);
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(2.0, ReviewLine."Logged Hours", 'A refused second call must leave the draft line as it was');
+        AssertBuckets('E1', 0, 2, 0, 0, 0, 'A refused second call must leave the reserved hours as they were');
+    end;
+
+    [Test]
+    procedure CreateReviews_AfterSendNewHoursGoToANewDraft()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        TempReview: Record "BCJ Customer Review" temporary;
+        SentReview: Record "BCJ Customer Review";
+        NewReview: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] A sent review is frozen (business flow step 4): the customer has been shown
+        // its figures. Hours synced afterwards cannot be slipped into it; they start a new Draft,
+        // and the hours of the sent review stay where they are.
+        // [GIVEN] A sent review holding E1
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
+        CreateOneReview(SentReview);
+        BCJTestLibrary.SendDraftReview(SentReview);
+        // [GIVEN] Then E2 is synced
+        AddEntry('E2', JobNo, 'T1', D() + 1, 3, "BCJ Billing Status"::Open);
+        // [WHEN] The project is put in review again
+        FilterOwnProjects(TimeEntry);
+        Assert.AreEqual(1, CustomerReviewMgt.CreateReviews(TimeEntry, TempReview), 'The new hours must produce exactly one review');
+        // [THEN] A new Draft holds only E2; the sent review is untouched
+        TempReview.FindFirst();
+        NewReview.Get(TempReview."Review No.");
+        Assert.AreNotEqual(SentReview."Review No.", NewReview."Review No.", 'Hours must never be added to a review that was already sent');
+        Assert.AreEqual("BCJ Review Status"::Draft, NewReview.Status, 'The new review must be a Draft');
+        ReviewLine.Get(NewReview."Review No.", 'T1');
+        Assert.AreEqual(3.0, ReviewLine."Logged Hours", 'The new draft must hold only the hours that were Open');
+        BCJTestLibrary.AssertRow(JiraId('E1'), SentReview."Review No.", 2, 0, 0, 0, 'E1 must stay in the sent review');
+        BCJTestLibrary.AssertRow(JiraId('E2'), NewReview."Review No.", 3, 0, 0, 0, 'E2 must be reserved in the new draft');
+        SentReview.Get(SentReview."Review No.");
+        Assert.AreEqual("BCJ Review Status"::Sent, SentReview.Status, 'The sent review must stay Sent');
+    end;
+
+    // ---------------------------------------------------------------------------------
+    // SendReview - the cut hours go back to Open, the review is frozen
+    // ---------------------------------------------------------------------------------
+
+    [Test]
+    procedure SendReview_ReleasesCutHoursOldestFirstInsideOneWorklog()
+    var
+        Review: Record "BCJ Customer Review";
+        JobNo: Code[20];
+        MailSent: Boolean;
+    begin
+        // [SCENARIO] Business flow step 4: on Send, the hours cut from the review (in review -
+        // Hours to Bill) return to Open immediately, so they can be written off or kept for a
+        // next review. Older hours are kept in review first, so the cut comes off the newest
+        // worklog and, when the kept amount ends inside a worklog, that worklog is split: the
+        // 6 h worklog keeps 5 in review and releases 1, the newer 4 h worklog is fully released.
+        // [GIVEN] A draft over 6 h (older) and 4 h (newer) on one task, Hours to Bill 5
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('OLD', JobNo, 'T1', D(), 6, "BCJ Billing Status"::Open);
+        AddEntry('NEW', JobNo, 'T1', D() + 1, 4, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        BCJTestLibrary.SetHoursToBill(Review."Review No.", 'T1', 5);
+        // [WHEN] The review is sent (the customer has no e-mail address)
+        Review.Get(Review."Review No.");
+        MailSent := CustomerReviewMgt.SendReview(Review);
+        // [THEN] Exactly the 5 hours to bill stay in review, oldest first; the rest is Open
+        AssertBuckets('OLD', 1, 5, 0, 0, 0, 'The older worklog must keep 5 hours in review and release its last hour');
+        AssertBuckets('NEW', 4, 0, 0, 0, 0, 'The newer worklog must be released completely');
+        AssertStatus('OLD', "BCJ Billing Status"::"Sent for Review", 'A worklog with hours still in review must show Sent for Review');
+        AssertStatus('NEW', "BCJ Billing Status"::Open, 'A fully released worklog must show Open');
+        // [THEN] The review is Sent and stamped; without a recipient no mail went out
+        Assert.IsFalse(MailSent, 'Without any recipient address SendReview must report that no e-mail was sent');
+        Review.Get(Review."Review No.");
+        Assert.AreEqual("BCJ Review Status"::Sent, Review.Status, 'A sent review must be Sent even when no e-mail could go out - the link can be shared by hand');
+        Assert.AreNotEqual(0DT, Review."Sent On", 'A sent review must record when it was sent');
+        AssertOwnInvariant('After SendReview');
+    end;
+
+    [Test]
+    procedure SendReview_SamePostingDateKeepsLowerJiraIdInReview()
+    var
+        Review: Record "BCJ Customer Review";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] Worklogs on the same day are the common case. Jira ID breaks the tie, so the
+        // same Send always keeps the same worklog in review - otherwise the overview and the later
+        // approval would disagree about which worklog the customer was asked about.
+        // [GIVEN] Two 3 h worklogs on the same day, Hours to Bill 4
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('A', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
+        AddEntry('B', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        BCJTestLibrary.SetHoursToBill(Review."Review No.", 'T1', 4);
+        // [WHEN] The review is sent
+        BCJTestLibrary.SendDraftReview(Review);
+        // [THEN] A is kept in full, B keeps 1 and releases 2
+        AssertBuckets('A', 0, 3, 0, 0, 0, 'On equal posting dates the lower Jira ID must be kept in review first');
+        AssertBuckets('B', 2, 1, 0, 0, 0, 'On equal posting dates the higher Jira ID must carry the cut');
+    end;
+
+    [Test]
+    procedure SendReview_RoundingDustIsNotReleased()
+    var
+        Review: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        JobNo: Code[20];
+        Logged: Decimal;
+    begin
+        // [SCENARIO] Jira logs seconds: 8 minutes are 0.133333 h, which the review shows as 0.13
+        // and asks the customer for 0.13. Sending that unchanged request must release nothing -
+        // releasing the invisible 0.003333 h would leave a worklog half in review and half Open
+        // for a figure nobody can see (contract: "If KeepHours >= Round(total in review, 0.01)
+        // everything is kept").
+        // [GIVEN] A draft over one 8-minute worklog, Hours to Bill left at its default
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        Logged := 480 / 3600;
+        AddEntry('E1', JobNo, 'T1', D(), Logged, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(0.13, ReviewLine."Hours to Bill", 'Fixture: the 8-minute worklog must be asked for as 0.13 h');
+        // [WHEN] The review is sent
+        BCJTestLibrary.SendDraftReview(Review);
+        // [THEN] The whole worklog is still in review and nothing is Open
+        AssertBuckets('E1', 0, Logged, 0, 0, 0, 'Sending an unchanged rounded request must keep the whole worklog in review');
+    end;
+
+    [Test]
+    procedure SendReview_DropsLinesWithZeroHoursToBill()
+    var
+        Review: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] A task the consultant decided not to charge at all (Hours to Bill 0) is not
+        // a question for the customer: the line is removed on Send so the customer is not asked
+        // to approve zero hours, and all its hours return to Open for the consultant to write
+        // off or keep.
+        // [GIVEN] A draft over T1 (3 h, Hours to Bill 0) and T2 (2 h, asked in full)
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        CreateTask(JobNo, 'T2');
+        AddEntry('E1', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
+        AddEntry('E2', JobNo, 'T2', D(), 2, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        BCJTestLibrary.SetHoursToBill(Review."Review No.", 'T1', 0);
+        // [WHEN] The review is sent
+        BCJTestLibrary.SendDraftReview(Review);
+        // [THEN] The T1 line is gone and its hours are Open; T2 is in review
+        Assert.IsFalse(ReviewLine.Get(Review."Review No.", 'T1'), 'A line with Hours to Bill 0 must be deleted on Send');
+        Assert.IsTrue(ReviewLine.Get(Review."Review No.", 'T2'), 'A line with hours to bill must stay on the sent review');
+        AssertBuckets('E1', 3, 0, 0, 0, 0, 'The hours of a dropped line must all return to Open');
+        AssertBuckets('E2', 0, 2, 0, 0, 0, 'The hours of a kept line must stay in review');
+    end;
+
+    [Test]
+    procedure SendReview_ClampsHoursToBillToHoursStillInReview()
+    var
+        Review: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] Jira can shrink a worklog while its review is still a draft; the trim then
+        // takes the hours out of the draft. The line may never ask the customer for hours that
+        // are no longer in review, so Send clamps Hours to Bill to what is actually there.
+        // [GIVEN] A draft over a 4 h worklog, which Jira then shrinks to 3 h
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 4, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        BCJTestLibrary.ChangeLoggedHours(JiraId('E1'), 3);
+        // [WHEN] The review is sent
+        BCJTestLibrary.SendDraftReview(Review);
+        // [THEN] The request is 3 and all 3 hours are in review
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(3.0, ReviewLine."Hours to Bill", 'Hours to Bill must be clamped to the hours still in review');
+        AssertBuckets('E1', 0, 3, 0, 0, 0, 'All remaining hours must stay in review');
+    end;
+
+    [Test]
+    procedure SendReview_OnSentReviewIsRefused()
+    var
+        Review: Record "BCJ Customer Review";
+        JobNo: Code[20];
+        SentOn: DateTime;
+    begin
+        // [SCENARIO] Send turns a Draft into a Sent review and releases its cut hours. Running it
+        // on a review that is already out would release hours a second time from a review the
+        // customer is looking at. (Re-mailing a sent review is SendReviews' job.)
+        // [GIVEN] A sent review
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 4, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        BCJTestLibrary.SetHoursToBill(Review."Review No.", 'T1', 3);
+        BCJTestLibrary.SendDraftReview(Review);
+        SentOn := Review."Sent On";
+        // [WHEN] It is sent again
+        // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
+        Commit();
+        asserterror CustomerReviewMgt.SendReview(Review);
+        // [THEN] Refused and nothing changed
+        Review.Get(Review."Review No.");
+        Assert.AreEqual("BCJ Review Status"::Sent, Review.Status, 'A refused second send must leave the review Sent');
+        Assert.AreEqual(SentOn, Review."Sent On", 'A refused second send must not restamp Sent On');
+        AssertBuckets('E1', 1, 3, 0, 0, 0, 'A refused second send must not release anything');
     end;
 
     // ---------------------------------------------------------------------------------
@@ -412,7 +699,7 @@ codeunit 50154 "BCJ Customer Review Tests"
     end;
 
     [Test]
-    procedure SendReviews_WithoutRecipientSkipsMailAndKeepsReview()
+    procedure SendReviews_WithoutRecipientSendsDraftButSkipsMail()
     var
         TimeEntry: Record "BCJ Project Time Entry";
         TempReview: Record "BCJ Customer Review" temporary;
@@ -420,10 +707,11 @@ codeunit 50154 "BCJ Customer Review Tests"
         Sent: Integer;
     begin
         // [SCENARIO] A project with no contact and no customer e-mail is a data gap, not a reason
-        // to abandon the review: the consultant can still send the link by hand from the review
-        // card. So the review is created and stays Sent, the mail is skipped, and nothing is
-        // stamped as sent - a false "sent on" timestamp would hide the gap forever.
-        // [GIVEN] A project whose customer has no e-mail and no bill-to contact
+        // to keep the review from the customer: the consultant can share the link by hand. So
+        // SendReviews sends the Draft (it becomes Sent, stamped Sent On, hours stay in review)
+        // but no mail is counted and no e-mail stamp is set - a false "e-mail sent on" timestamp
+        // would hide the gap forever.
+        // [GIVEN] A draft review of a project whose customer has no e-mail and no bill-to contact
         Initialize();
         CreateSingleTaskProjectWithOpenEntry('E1', 2);
         FilterOwnProjects(TimeEntry);
@@ -433,13 +721,14 @@ codeunit 50154 "BCJ Customer Review Tests"
         Assert.AreEqual('', ReviewMail.GetRecipientEmail(Review), 'With neither contact nor customer e-mail there must be no recipient at all');
         // [WHEN] The reviews are sent
         Sent := CustomerReviewMgt.SendReviews(TempReview);
-        // [THEN] No mail counted, no stamps, review still waiting for the customer
-        Assert.AreEqual(0, Sent, 'A review without a recipient must count as not sent');
+        // [THEN] No mail counted, review Sent without e-mail stamps, hours still in review
+        Assert.AreEqual(0, Sent, 'A review without a recipient must count as not e-mailed');
         Review.Get(TempReview."Review No.");
-        Assert.AreEqual("BCJ Review Status"::Sent, Review.Status, 'A review whose mail could not be sent must still exist and still be waiting for an answer');
+        Assert.AreEqual("BCJ Review Status"::Sent, Review.Status, 'SendReviews must send a Draft even when no e-mail can go out');
+        Assert.AreNotEqual(0DT, Review."Sent On", 'A sent review must record when it was sent, mail or no mail');
         Assert.AreEqual('', Review."Sent To E-Mail", 'No recipient may be stamped when no mail was sent');
-        Assert.AreEqual(0DT, Review."E-Mail Sent On", 'No sent-on timestamp may be stamped when no mail was sent');
-        AssertEntry('E1', "BCJ Billing Status"::"Sent for Review", 2, Review."Review No.", 'The entries must stay parked in the review even when the mail could not be sent');
+        Assert.AreEqual(0DT, Review."E-Mail Sent On", 'No e-mail timestamp may be stamped when no mail was sent');
+        AssertBuckets('E1', 0, 2, 0, 0, 0, 'The hours must stay in review when the mail could not be sent');
     end;
 
     [Test]
@@ -504,20 +793,20 @@ codeunit 50154 "BCJ Customer Review Tests"
     end;
 
     // ---------------------------------------------------------------------------------
-    // Submit and apply
+    // Submit and apply - approved hours Billable oldest first, the rest back to Open
     // ---------------------------------------------------------------------------------
 
     [Test]
-    procedure SubmitReview_FullApprovalMakesEveryEntryBillable()
+    procedure SubmitReview_FullApprovalMakesEveryHourBillable()
     var
         Review: Record "BCJ Customer Review";
         ReviewLine: Record "BCJ Customer Review Line";
         JobNo: Code[20];
     begin
-        // [SCENARIO] The customer approves everything. Every hour sent then becomes invoiceable
-        // exactly as logged - the answer is applied immediately, because a consultant who has to
-        // re-open each review to apply it will eventually not bother, and the hours rot.
-        // [GIVEN] A review over two tasks and three entries
+        // [SCENARIO] The customer approves everything. Every hour sent then becomes Billable
+        // (approved, not invoiced) exactly as logged - the answer is applied immediately, because
+        // a consultant who has to apply each answer by hand will eventually not bother.
+        // [GIVEN] A sent review over two tasks and three entries
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
@@ -525,48 +814,50 @@ codeunit 50154 "BCJ Customer Review Tests"
         AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
         AddEntry('E2', JobNo, 'T1', D() + 1, 1, "BCJ Billing Status"::Open);
         AddEntry('E3', JobNo, 'T2', D(), 3, "BCJ Billing Status"::Open);
-        CreateOneReview(Review);
+        CreateSentReview(Review);
         // [WHEN] Every line is approved in full and the review is submitted
-        ApproveAllLogged(Review."Review No.");
+        ApproveAllHoursToBill(Review."Review No.");
         CustomerReviewMgt.SubmitReview(Review);
-        // [THEN] The review is answered and every entry is billable for its full hours
+        // [THEN] The review is answered and every hour is Billable
         Review.Get(Review."Review No.");
         Assert.AreEqual("BCJ Review Status"::Answered, Review.Status, 'A submitted review must be Answered');
         Assert.AreNotEqual(0DT, Review."Answered On", 'A submitted review must record when the customer answered');
-        AssertEntry('E1', "BCJ Billing Status"::Billable, 2, Review."Review No.", 'A fully approved entry must become Billable for all of its hours');
-        AssertEntry('E2', "BCJ Billing Status"::Billable, 1, Review."Review No.", 'A fully approved entry must become Billable for all of its hours');
-        AssertEntry('E3', "BCJ Billing Status"::Billable, 3, Review."Review No.", 'A fully approved entry must become Billable for all of its hours');
+        AssertBuckets('E1', 0, 0, 2, 0, 0, 'A fully approved entry must be Billable for all of its hours');
+        AssertBuckets('E2', 0, 0, 1, 0, 0, 'A fully approved entry must be Billable for all of its hours');
+        AssertBuckets('E3', 0, 0, 3, 0, 0, 'A fully approved entry must be Billable for all of its hours');
+        BCJTestLibrary.AssertRow(JiraId('E1'), Review."Review No.", 0, 2, 0, 0, 'The approved hours must sit on the row of the review that approved them');
         ReviewLine.Get(Review."Review No.", 'T1');
         Assert.AreEqual(3.0, ReviewLine."Applied Hours", 'Applied Hours must equal the approved hours when every approved hour found an entry');
         ReviewLine.Get(Review."Review No.", 'T2');
         Assert.AreEqual(3.0, ReviewLine."Applied Hours", 'Applied Hours must equal the approved hours when every approved hour found an entry');
+        AssertOwnInvariant('After a full approval');
     end;
 
     [Test]
-    procedure SubmitReview_ZeroApprovalMakesEveryEntryNotBillable()
+    procedure SubmitReview_ZeroApprovalReturnsEveryHourToOpen()
     var
         Review: Record "BCJ Customer Review";
         ReviewLine: Record "BCJ Customer Review Line";
         JobNo: Code[20];
     begin
-        // [SCENARIO] The customer rejects a task outright. The hours were still worked and must
-        // stay on the project as a record, but nothing may reach an invoice: status Not Billable
-        // with a zero allocation. Leaving them Open would put them back in the next review.
-        // [GIVEN] A review over one task with two entries
+        // [SCENARIO] Business flow step 5: "every hour not approved returns to Open". A rejection
+        // is the customer's answer, not the consultant's write-off: the hours go back to the
+        // consultant, who decides from the overview whether to write them off or raise them again.
+        // [GIVEN] A sent review over one task with two entries
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
         AddEntry('E2', JobNo, 'T1', D() + 1, 1, "BCJ Billing Status"::Open);
-        CreateOneReview(Review);
+        CreateSentReview(Review);
         // [WHEN] The line is approved for zero hours and submitted
-        SetApproved(Review."Review No.", 'T1', 0);
+        BCJTestLibrary.SetApprovedHours(Review."Review No.", 'T1', 0);
         CustomerReviewMgt.SubmitReview(Review);
-        // [THEN] Both entries are Not Billable with nothing allocated
+        // [THEN] Both entries are fully Open again
         Review.Get(Review."Review No.");
         Assert.AreEqual("BCJ Review Status"::Answered, Review.Status, 'A submitted review must be Answered even when nothing was approved');
-        AssertEntry('E1', "BCJ Billing Status"::"Not Billable", 0, Review."Review No.", 'An entry on a task approved for zero hours must be Not Billable with no hours allocated');
-        AssertEntry('E2', "BCJ Billing Status"::"Not Billable", 0, Review."Review No.", 'An entry on a task approved for zero hours must be Not Billable with no hours allocated');
+        AssertBuckets('E1', 2, 0, 0, 0, 0, 'Hours the customer did not approve must return to Open, not be written off');
+        AssertBuckets('E2', 1, 0, 0, 0, 0, 'Hours the customer did not approve must return to Open, not be written off');
         ReviewLine.Get(Review."Review No.", 'T1');
         Assert.AreEqual(0.0, ReviewLine."Applied Hours", 'Nothing may be recorded as applied when nothing was approved');
     end;
@@ -578,52 +869,51 @@ codeunit 50154 "BCJ Customer Review Tests"
         ReviewLine: Record "BCJ Customer Review Line";
         JobNo: Code[20];
     begin
-        // [SCENARIO] The customer approves fewer hours than were logged. The approval is per task,
-        // so someone has to decide which worklog carries the cut: oldest first, because the
-        // earliest hours are the ones the customer has had the longest and is least likely to
-        // dispute, and because a deterministic order makes the result reproducible and auditable.
-        // [GIVEN] A task with 1 hour on day D and 3 hours on day D+1, of which 2.5 are approved
+        // [SCENARIO] The customer approves fewer hours than were asked. The approval is per task,
+        // so someone has to decide which worklog carries the cut: oldest first, deterministic and
+        // auditable. The approval ends inside the newer worklog, which is split: its approved part
+        // is Billable, its remainder returns to Open.
+        // [GIVEN] A task with 1 h on day D and 3 h on day D+1, of which 2.5 are approved
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('OLD', JobNo, 'T1', D(), 1, "BCJ Billing Status"::Open);
         AddEntry('NEW', JobNo, 'T1', D() + 1, 3, "BCJ Billing Status"::Open);
-        CreateOneReview(Review);
+        CreateSentReview(Review);
         // [WHEN] 2.5 hours are approved and the review is submitted
-        SetApproved(Review."Review No.", 'T1', 2.5);
+        BCJTestLibrary.SetApprovedHours(Review."Review No.", 'T1', 2.5);
         CustomerReviewMgt.SubmitReview(Review);
-        // [THEN] The older entry is filled first, the newer takes the remainder
-        Review.Get(Review."Review No.");
-        AssertEntry('OLD', "BCJ Billing Status"::Billable, 1, Review."Review No.", 'The oldest entry must be filled first and keep all of its hour');
-        AssertEntry('NEW', "BCJ Billing Status"::Billable, 1.5, Review."Review No.", 'The newer entry must carry the cut and keep only the approved remainder');
+        // [THEN] The older entry is filled first, the newer takes the remainder and releases the rest
+        AssertBuckets('OLD', 0, 0, 1, 0, 0, 'The oldest entry must be approved first and in full');
+        AssertBuckets('NEW', 1.5, 0, 1.5, 0, 0, 'The newer entry must carry the cut: 1.5 approved, 1.5 back to Open');
         ReviewLine.Get(Review."Review No.", 'T1');
         Assert.AreEqual(2.5, ReviewLine."Applied Hours", 'All approved hours must be applied when the entries can absorb them');
+        AssertOwnInvariant('After a partial approval');
     end;
 
     [Test]
-    procedure SubmitReview_PartialApprovalZeroesTheEntryLeftWithNothing()
+    procedure SubmitReview_PartialApprovalReturnsTheEntryLeftWithNothingToOpen()
     var
         Review: Record "BCJ Customer Review";
         JobNo: Code[20];
     begin
         // [SCENARIO] When the approved hours run out before the entries do, the entries left over
-        // are decided, not undecided: nothing was approved for them, so they are Not Billable with
-        // a zero allocation. Leaving them Billable with zero hours would put a zero line on an
-        // invoice; leaving them Open would send them to the customer a second time.
-        // [GIVEN] A task with 2 hours on day D and 1 hour on day D+1, of which exactly 2 are approved
+        // were not approved - they go back to Open, where the consultant decides on them. They
+        // must not stay Billable for zero hours nor be silently written off.
+        // [GIVEN] A task with 2 h on day D and 1 h on day D+1, of which exactly 2 are approved
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('OLD', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
         AddEntry('NEW', JobNo, 'T1', D() + 1, 1, "BCJ Billing Status"::Open);
-        CreateOneReview(Review);
+        CreateSentReview(Review);
         // [WHEN] 2 hours are approved and the review is submitted
-        SetApproved(Review."Review No.", 'T1', 2);
+        BCJTestLibrary.SetApprovedHours(Review."Review No.", 'T1', 2);
         CustomerReviewMgt.SubmitReview(Review);
-        // [THEN] The older entry keeps its hours, the newer is explicitly not billable
-        Review.Get(Review."Review No.");
-        AssertEntry('OLD', "BCJ Billing Status"::Billable, 2, Review."Review No.", 'The oldest entry must absorb the approved hours in full');
-        AssertEntry('NEW', "BCJ Billing Status"::"Not Billable", 0, Review."Review No.", 'An entry left with no approved hours must be Not Billable, never Billable for zero hours');
+        // [THEN] The older entry is Billable, the newer is Open again
+        AssertBuckets('OLD', 0, 0, 2, 0, 0, 'The oldest entry must absorb the approved hours in full');
+        AssertBuckets('NEW', 1, 0, 0, 0, 0, 'An entry left with no approved hours must be fully Open again');
+        AssertStatus('NEW', "BCJ Billing Status"::Open, 'An entry left with no approved hours must show Open');
     end;
 
     [Test]
@@ -633,23 +923,55 @@ codeunit 50154 "BCJ Customer Review Tests"
         JobNo: Code[20];
     begin
         // [SCENARIO] Two worklogs on the same day are the common case, so posting date alone does
-        // not determine the order. The Jira ID breaks the tie, which makes the allocation
-        // deterministic: the same answer applied twice must always cut the same worklog, or two
-        // runs of the same review produce two different invoices.
+        // not determine the order. The Jira ID breaks the tie: the same answer applied twice must
+        // always cut the same worklog, or two runs of the same review produce two invoices.
         // [GIVEN] Two 3-hour entries on the same day, of which only 3 hours are approved
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('A', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
         AddEntry('B', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
-        CreateOneReview(Review);
+        CreateSentReview(Review);
         // [WHEN] 3 hours are approved and the review is submitted
-        SetApproved(Review."Review No.", 'T1', 3);
+        BCJTestLibrary.SetApprovedHours(Review."Review No.", 'T1', 3);
         CustomerReviewMgt.SubmitReview(Review);
-        // [THEN] The lower Jira ID is served first and the other is left with nothing
-        Review.Get(Review."Review No.");
-        AssertEntry('A', "BCJ Billing Status"::Billable, 3, Review."Review No.", 'On equal posting dates the lower Jira ID must be allocated first');
-        AssertEntry('B', "BCJ Billing Status"::"Not Billable", 0, Review."Review No.", 'On equal posting dates the higher Jira ID must be the one left without approved hours');
+        // [THEN] The lower Jira ID is served first and the other goes back to Open
+        AssertBuckets('A', 0, 0, 3, 0, 0, 'On equal posting dates the lower Jira ID must be approved first');
+        AssertBuckets('B', 3, 0, 0, 0, 0, 'On equal posting dates the higher Jira ID must be the one returned to Open');
+    end;
+
+    [Test]
+    procedure ApplyAnswer_PartialApprovalInsideOneWorklogThenNextReviewTakesOnlyRemainder()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        FirstReview: Record "BCJ Customer Review";
+        SecondReview: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] The reason for per-hour buckets: one Jira worklog can be partly approved and
+        // partly unbilled. The customer approves 2.5 of a 4 h worklog; the 1.5 h not approved are
+        // Open and can go into the next review - and only those 1.5 h, never the approved part.
+        // [GIVEN] A 4 h worklog sent in full, of which the customer approves 2.5
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 4, "BCJ Billing Status"::Open);
+        BCJTestLibrary.ReviewSingleEntry(JiraId('E1'), 4, 2.5, FirstReview);
+        // [THEN] The worklog is split: 2.5 Billable, 1.5 Open
+        AssertBuckets('E1', 1.5, 0, 2.5, 0, 0, 'A partly approved worklog must be Billable for the approved part and Open for the rest');
+        AssertStatus('E1', "BCJ Billing Status"::Open, 'A worklog with Open hours left must show Open');
+        // [WHEN] The project is put in review again
+        FilterOwnProjects(TimeEntry);
+        BCJTestLibrary.CreateDraftReview(TimeEntry, SecondReview);
+        // [THEN] The new draft reserves only the 1.5 Open hours; the approved 2.5 stay with the first review
+        Assert.AreNotEqual(FirstReview."Review No.", SecondReview."Review No.", 'The remainder must go into a new review');
+        ReviewLine.Get(SecondReview."Review No.", 'T1');
+        Assert.AreEqual(1.5, ReviewLine."Logged Hours", 'The next review must hold only the hours that were Open');
+        BCJTestLibrary.AssertRow(JiraId('E1'), FirstReview."Review No.", 0, 2.5, 0, 0, 'The approved hours must stay on the first review''s row');
+        BCJTestLibrary.AssertRow(JiraId('E1'), SecondReview."Review No.", 1.5, 0, 0, 0, 'Only the Open remainder may be reserved in the second review');
+        AssertBuckets('E1', 0, 1.5, 2.5, 0, 0, 'The worklog must now be 1.5 in review and 2.5 approved');
+        AssertOwnInvariant('After reviewing the remainder');
     end;
 
     [Test]
@@ -660,15 +982,15 @@ codeunit 50154 "BCJ Customer Review Tests"
         JobNo: Code[20];
     begin
         // [SCENARIO] The customer's browser can be reloaded and the API can be called twice. A
-        // second submit must not apply the answer again: the entries are no longer in review, so a
-        // re-run would find nothing and could silently zero the allocation that was already made.
+        // second submit must not apply the answer again: the hours are no longer in review, so a
+        // re-run would find nothing and could silently undo the allocation that was already made.
         // [GIVEN] A review that has been submitted once
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
-        CreateOneReview(Review);
-        SetApproved(Review."Review No.", 'T1', 2);
+        CreateSentReview(Review);
+        BCJTestLibrary.SetApprovedHours(Review."Review No.", 'T1', 2);
         CustomerReviewMgt.SubmitReview(Review);
         // [WHEN] It is submitted a second time
         Review.Get(Review."Review No.");
@@ -679,9 +1001,34 @@ codeunit 50154 "BCJ Customer Review Tests"
         Assert.ExpectedErrorCode('TestField');
         Review.Get(Review."Review No.");
         Assert.AreEqual("BCJ Review Status"::Answered, Review.Status, 'A review already answered must stay Answered after a refused second submit');
-        AssertEntry('E1', "BCJ Billing Status"::Billable, 2, Review."Review No.", 'A refused second submit must leave the applied allocation untouched');
+        AssertBuckets('E1', 0, 0, 2, 0, 0, 'A refused second submit must leave the applied allocation untouched');
         ReviewLine.Get(Review."Review No.", 'T1');
         Assert.AreEqual(2.0, ReviewLine."Applied Hours", 'A refused second submit must not change what was already applied');
+    end;
+
+    [Test]
+    procedure SubmitReview_OnDraftIsRejected()
+    var
+        Review: Record "BCJ Customer Review";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] A draft has not been shown to the customer, so there is nothing they could
+        // have answered (contract: SubmitReview - review must be Sent). Accepting it would let a
+        // leaked draft link decide hours the consultant is still preparing.
+        // [GIVEN] A draft review
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        // [WHEN] It is submitted
+        // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
+        Commit();
+        asserterror CustomerReviewMgt.SubmitReview(Review);
+        // [THEN] Refused; still a draft with its hours reserved
+        Review.Get(Review."Review No.");
+        Assert.AreEqual("BCJ Review Status"::Draft, Review.Status, 'A draft must stay a draft when a submit is refused');
+        AssertBuckets('E1', 0, 2, 0, 0, 0, 'A refused submit must leave the reserved hours in review');
     end;
 
     [Test]
@@ -690,16 +1037,16 @@ codeunit 50154 "BCJ Customer Review Tests"
         Review: Record "BCJ Customer Review";
         JobNo: Code[20];
     begin
-        // [SCENARIO] The consultant cancels a review and the hours go back to Open for another
-        // decision. A customer who still has the old link open must not be able to submit it
-        // afterwards - that would re-decide hours the consultant has meanwhile taken back.
-        // [GIVEN] A cancelled review
+        // [SCENARIO] The consultant cancels a review and the hours go back to Open. A customer who
+        // still has the old link open must not be able to submit it afterwards - that would
+        // re-decide hours the consultant has meanwhile taken back.
+        // [GIVEN] A cancelled review that had an approval entered
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
-        CreateOneReview(Review);
-        SetApproved(Review."Review No.", 'T1', 2);
+        CreateSentReview(Review);
+        BCJTestLibrary.SetApprovedHours(Review."Review No.", 'T1', 2);
         CustomerReviewMgt.CancelReview(Review);
         // [WHEN] The customer submits the old link
         Review.Get(Review."Review No.");
@@ -710,7 +1057,7 @@ codeunit 50154 "BCJ Customer Review Tests"
         Assert.ExpectedErrorCode('TestField');
         Review.Get(Review."Review No.");
         Assert.AreEqual("BCJ Review Status"::Cancelled, Review.Status, 'A cancelled review must stay cancelled when a late submit is refused');
-        AssertEntry('E1', "BCJ Billing Status"::Open, 2, 0, 'A late submit on a cancelled review must not re-decide the released entry');
+        AssertBuckets('E1', 2, 0, 0, 0, 0, 'A late submit on a cancelled review must not re-decide the released hours');
     end;
 
     [Test]
@@ -720,25 +1067,25 @@ codeunit 50154 "BCJ Customer Review Tests"
         ReviewLine: Record "BCJ Customer Review Line";
         JobNo: Code[20];
     begin
-        // [SCENARIO] The approved hours come from a public web form. Approving more than was
-        // logged would invent hours nobody worked and let the allocation exceed what exists;
-        // approving a negative number is meaningless. Both are refused at the field, before
-        // anything is stored, because the API writes the line directly.
-        // [GIVEN] A review line with 3 logged hours
+        // [SCENARIO] The approved hours come from a public web form. Approving more than was asked
+        // would invent hours nobody agreed to sell; approving a negative number is meaningless.
+        // Both are refused at the field, before anything is stored, because the API writes the
+        // line directly.
+        // [GIVEN] A sent review line asking for 3 hours
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('E1', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
-        CreateOneReview(Review);
+        CreateSentReview(Review);
         ReviewLine.Get(Review."Review No.", 'T1');
-        // [WHEN] More hours than logged are approved
+        // [WHEN] More hours than asked are approved
         // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
         Commit();
         asserterror ReviewLine.Validate("Approved Hours", 4);
         // [THEN] Refused and the stored value is unchanged
         Assert.ExpectedErrorCode('Dialog');
         ReviewLine.Get(Review."Review No.", 'T1');
-        Assert.AreEqual(0.0, ReviewLine."Approved Hours", 'Approving more hours than were logged must leave the stored approval unchanged');
+        Assert.AreEqual(0.0, ReviewLine."Approved Hours", 'Approving more hours than were asked must leave the stored approval unchanged');
         // [WHEN] A negative number of hours is approved
         // (The field minimum may catch this before the range check does, so only the state is asserted.)
         // Nothing has been written since the Commit above, so this rolls back to the same point.
@@ -756,28 +1103,25 @@ codeunit 50154 "BCJ Customer Review Tests"
         JobNo: Code[20];
     begin
         // [SCENARIO] Once the answer has been applied, the lines are the record of what the
-        // customer agreed to and what was billed on the strength of it. The API stays open to the
-        // customer's browser, so the table itself refuses the write: editing an answered line
-        // would leave the review saying something different from what the entries carry.
+        // customer agreed to and what was billed on the strength of it. "Approved Hours" may only
+        // change while the review is Sent, so editing an answered line is refused - it would leave
+        // the review saying something different from what the worklogs carry.
         // [GIVEN] A review that has been answered
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('E1', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
-        CreateOneReview(Review);
-        SetApproved(Review."Review No.", 'T1', 3);
+        CreateSentReview(Review);
+        BCJTestLibrary.SetApprovedHours(Review."Review No.", 'T1', 3);
         CustomerReviewMgt.SubmitReview(Review);
         // [WHEN] The customer tries to change the approved hours afterwards
-        ReviewLine.Get(Review."Review No.", 'T1');
-        ReviewLine.Validate("Approved Hours", 1);
         // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
         Commit();
-        asserterror ReviewLine.Modify(true);
+        asserterror BCJTestLibrary.SetApprovedHours(Review."Review No.", 'T1', 1);
         // [THEN] Refused and the answered line is unchanged
-        Assert.ExpectedErrorCode('TestField');
         ReviewLine.Get(Review."Review No.", 'T1');
         Assert.AreEqual(3.0, ReviewLine."Approved Hours", 'An answered review line must keep the hours the customer actually approved');
-        AssertEntry('E1', "BCJ Billing Status"::Billable, 3, Review."Review No.", 'A refused line edit must not change what was allocated to the entries');
+        AssertBuckets('E1', 0, 0, 3, 0, 0, 'A refused line edit must not change what was allocated to the entries');
     end;
 
     [Test]
@@ -789,28 +1133,26 @@ codeunit 50154 "BCJ Customer Review Tests"
         JobNo: Code[20];
     begin
         // [SCENARIO] Jira is the source of the worklogs and a worklog can be deleted there while
-        // the customer is still holding the review. The customer's answer then refers to hours
-        // that no longer exist. Applying what remains and recording the shortfall in Applied Hours
-        // is right: erroring would trap the review forever, and inventing the missing hours would
-        // bill work the consultant has withdrawn.
-        // [GIVEN] A review over 2 + 3 hours, of which the 3-hour entry is deleted afterwards
+        // the customer is still holding the review; the sync deletes it with its allocation. The
+        // customer's answer then refers to hours that no longer exist. Applying what remains and
+        // recording the shortfall in Applied Hours is right: erroring would trap the review
+        // forever, and inventing the missing hours would bill work the consultant has withdrawn.
+        // [GIVEN] A sent review over 2 + 3 hours, of which the 3-hour worklog is deleted afterwards
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('KEPT', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
         AddEntry('GONE', JobNo, 'T1', D() + 1, 3, "BCJ Billing Status"::Open);
-        CreateOneReview(Review);
-        ReviewLine.Get(Review."Review No.", 'T1');
-        Assert.AreEqual(5.0, ReviewLine."Logged Hours", 'Fixture: the review line must have been sent with both entries');
+        CreateSentReview(Review);
         GetEntry('GONE', TimeEntry);
-        TimeEntry.Delete(false);
+        TimeEntry.Delete(true);
         // [WHEN] The customer approves all 5 hours and submits
-        SetApproved(Review."Review No.", 'T1', 5);
+        BCJTestLibrary.SetApprovedHours(Review."Review No.", 'T1', 5);
         CustomerReviewMgt.SubmitReview(Review);
         // [THEN] The surviving entry is billable in full, and the shortfall is visible, not an error
         Review.Get(Review."Review No.");
         Assert.AreEqual("BCJ Review Status"::Answered, Review.Status, 'A review whose entries partly disappeared must still be answerable');
-        AssertEntry('KEPT', "BCJ Billing Status"::Billable, 2, Review."Review No.", 'The surviving entry must take as much of the approval as it can carry');
+        AssertBuckets('KEPT', 0, 0, 2, 0, 0, 'The surviving entry must take as much of the approval as it can carry');
         ReviewLine.Get(Review."Review No.", 'T1');
         Assert.AreEqual(2.0, ReviewLine."Applied Hours", 'Applied Hours must show what could actually be allocated, not what was approved');
         Assert.AreEqual(5.0, ReviewLine."Approved Hours", 'What the customer approved must be kept as the customer stated it');
@@ -821,48 +1163,42 @@ codeunit 50154 "BCJ Customer Review Tests"
     var
         Review: Record "BCJ Customer Review";
         ReviewLine: Record "BCJ Customer Review Line";
-        TimeEntry: Record "BCJ Project Time Entry";
         JobNo: Code[20];
     begin
         // [SCENARIO] A consultant can correct a worklog in Jira while the review is out, and the
-        // sync brings the smaller number into BC. The customer then approves 4 hours against an
-        // entry that now only holds 1.5. An entry may never be billable for more hours than it
-        // logs, so the allocation is capped at the entry - the customer's approval is a ceiling,
-        // not a quantity to be invented.
-        // [GIVEN] A review over one 4-hour entry that is re-synced down to 1.5 hours
+        // sync trims the hours in review to the smaller number. The customer then approves 4 hours
+        // against a worklog that now only holds 1.5. A worklog may never be billable for more hours
+        // than it logs - the customer's approval is a ceiling, not a quantity to be invented.
+        // [GIVEN] A sent review over one 4-hour worklog that is re-synced down to 1.5 hours
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('E1', JobNo, 'T1', D(), 4, "BCJ Billing Status"::Open);
-        CreateOneReview(Review);
-        GetEntry('E1', TimeEntry);
-        TimeEntry.Validate("Time Spent in Hours", 1.5);
-        TimeEntry.Modify(true);
+        CreateSentReview(Review);
+        BCJTestLibrary.ChangeLoggedHours(JiraId('E1'), 1.5);
         // [WHEN] The customer approves the 4 hours they were originally shown
-        SetApproved(Review."Review No.", 'T1', 4);
+        BCJTestLibrary.SetApprovedHours(Review."Review No.", 'T1', 4);
         CustomerReviewMgt.SubmitReview(Review);
-        // [THEN] Only the hours that still exist are allocated
-        Review.Get(Review."Review No.");
-        AssertEntry('E1', "BCJ Billing Status"::Billable, 1.5, Review."Review No.", 'An entry must never be billable for more hours than it now logs');
+        // [THEN] Only the hours that still exist are approved
+        AssertBuckets('E1', 0, 0, 1.5, 0, 0, 'A worklog must never be billable for more hours than it now logs');
         ReviewLine.Get(Review."Review No.", 'T1');
         Assert.AreEqual(1.5, ReviewLine."Applied Hours", 'Applied Hours must show the capped allocation, not the approval');
     end;
 
     // ---------------------------------------------------------------------------------
-    // Cancel and reopen
+    // Cancel, delete and reopen
     // ---------------------------------------------------------------------------------
 
     [Test]
-    procedure CancelReview_ReturnsEntriesToOpen()
+    procedure CancelReview_DraftReturnsHoursToOpen()
     var
         Review: Record "BCJ Customer Review";
         JobNo: Code[20];
     begin
-        // [SCENARIO] A review sent to the wrong customer, or superseded by a phone call, has to be
-        // taken back. The hours must return to exactly the state they were in before it was sent -
-        // Open, no review, full allocation - or they are stranded in "Sent for Review" where no
-        // invoicing run and no later review will ever pick them up again.
-        // [GIVEN] A review holding two entries
+        // [SCENARIO] A draft prepared for the wrong period, or superseded, has to be taken back.
+        // Its reserved hours must return to exactly the state they were in before - Open - or
+        // they are stranded in review where no invoicing run and no later review picks them up.
+        // [GIVEN] A draft review holding two entries
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
@@ -871,39 +1207,73 @@ codeunit 50154 "BCJ Customer Review Tests"
         CreateOneReview(Review);
         // [WHEN] The review is cancelled
         CustomerReviewMgt.CancelReview(Review);
-        // [THEN] The entries are Open again with their hours intact, and the review records the cancellation
+        // [THEN] The hours are Open again, and the review records the cancellation
         Review.Get(Review."Review No.");
         Assert.AreEqual("BCJ Review Status"::Cancelled, Review.Status, 'A cancelled review must be Cancelled');
         Assert.AreNotEqual(0DT, Review."Cancelled On", 'A cancelled review must record when it was cancelled');
-        AssertEntry('E1', "BCJ Billing Status"::Open, 2, 0, 'A released entry must be Open again, unlinked from the review, with its full hours allocated');
-        AssertEntry('E2', "BCJ Billing Status"::Open, 3, 0, 'A released entry must be Open again, unlinked from the review, with its full hours allocated');
+        AssertBuckets('E1', 2, 0, 0, 0, 0, 'A released entry must be fully Open again');
+        AssertBuckets('E2', 3, 0, 0, 0, 0, 'A released entry must be fully Open again');
+        AssertOwnInvariant('After cancelling a draft');
     end;
 
     [Test]
-    procedure CancelReview_LeavesBilledEntriesUntouched()
+    procedure CancelReview_SentReturnsHoursToOpen()
     var
         Review: Record "BCJ Customer Review";
         JobNo: Code[20];
     begin
-        // [SCENARIO] An entry can be invoiced by another route while the review is out - the
-        // legacy page still sets Is Billed. Cancelling the review must not drag an invoiced hour
-        // back to Open: the invoice exists, and re-opening it would let the same hour be billed a
-        // second time. Only what is still sitting in the review is released.
-        // [GIVEN] A review whose second entry has meanwhile been invoiced
+        // [SCENARIO] A review sent to the wrong customer, or settled by phone, is cancelled while
+        // it is out. Everything still in review returns to Open; the hours the Send already cut
+        // are Open anyway - so the task ends up exactly as it was before the review.
+        // [GIVEN] A review over 6 h + 4 h sent with Hours to Bill 5
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
-        AddEntry('INREVIEW', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
-        AddEntry('BILLED', JobNo, 'T1', D() + 1, 3, "BCJ Billing Status"::Open);
+        AddEntry('OLD', JobNo, 'T1', D(), 6, "BCJ Billing Status"::Open);
+        AddEntry('NEW', JobNo, 'T1', D() + 1, 4, "BCJ Billing Status"::Open);
         CreateOneReview(Review);
-        SetEntryStatus('BILLED', "BCJ Billing Status"::Billed);
+        BCJTestLibrary.SetHoursToBill(Review."Review No.", 'T1', 5);
+        BCJTestLibrary.SendDraftReview(Review);
         // [WHEN] The review is cancelled
         CustomerReviewMgt.CancelReview(Review);
-        // [THEN] Only the entry still in review is released
+        // [THEN] Every hour is Open again
         Review.Get(Review."Review No.");
-        Assert.AreEqual("BCJ Review Status"::Cancelled, Review.Status, 'A review must still cancel when some of its entries have moved on');
-        AssertEntry('INREVIEW', "BCJ Billing Status"::Open, 2, 0, 'The entry still in review must be released back to Open');
-        AssertEntry('BILLED', "BCJ Billing Status"::Billed, 3, Review."Review No.", 'An entry invoiced while the review was out must stay Billed and keep its review link');
+        Assert.AreEqual("BCJ Review Status"::Cancelled, Review.Status, 'A sent review must be cancellable');
+        AssertBuckets('OLD', 6, 0, 0, 0, 0, 'The hours still in review must return to Open');
+        AssertBuckets('NEW', 4, 0, 0, 0, 0, 'The hours cut on Send must still be Open');
+    end;
+
+    [Test]
+    procedure CancelReview_LeavesBilledHoursUntouched()
+    var
+        Review: Record "BCJ Customer Review";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] Contract, ReleaseReview: "All In Review hours of the review return to Open.
+        // Billable/Billed untouched". A reopened review can hold hours that were already invoiced
+        // (Reopen never un-bills). Cancelling it must not drag an invoiced hour back to Open: the
+        // invoice exists, and re-opening it would let the same hour be billed a second time.
+        // [GIVEN] A review over E1 (4 h) and E2 (2 h), fully approved; E1 then invoiced; the review reopened
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 4, "BCJ Billing Status"::Open);
+        AddEntry('E2', JobNo, 'T1', D() + 1, 2, "BCJ Billing Status"::Open);
+        CreateSentReview(Review);
+        BCJTestLibrary.SetApprovedHours(Review."Review No.", 'T1', 6);
+        BCJTestLibrary.SubmitAnswer(Review);
+        BCJTestLibrary.MarkEntryById(JiraId('E1'), "BCJ Billing Status"::Billed);
+        CustomerReviewMgt.ReopenReview(Review);
+        AssertBuckets('E1', 0, 0, 0, 0, 4, 'Fixture: Reopen must leave the invoiced hours Billed');
+        AssertBuckets('E2', 0, 2, 0, 0, 0, 'Fixture: Reopen must put the approved, uninvoiced hours back in review');
+        // [WHEN] The reopened review is cancelled
+        Review.Get(Review."Review No.");
+        CustomerReviewMgt.CancelReview(Review);
+        // [THEN] Only the hours still in review are released
+        Review.Get(Review."Review No.");
+        Assert.AreEqual("BCJ Review Status"::Cancelled, Review.Status, 'A reopened review must be cancellable');
+        AssertBuckets('E1', 0, 0, 0, 0, 4, 'Invoiced hours must stay Billed when their review is cancelled');
+        AssertBuckets('E2', 2, 0, 0, 0, 0, 'The hours in review must be released back to Open');
     end;
 
     [Test]
@@ -913,15 +1283,15 @@ codeunit 50154 "BCJ Customer Review Tests"
         JobNo: Code[20];
     begin
         // [SCENARIO] Cancelling releases hours back to Open. Doing that after the customer has
-        // answered would throw away their decision and re-open hours that are already billable -
+        // answered would throw away their decision and re-open hours that are already approved -
         // the way back from an answered review is Reopen, which keeps the answer.
         // [GIVEN] An answered review
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
-        CreateOneReview(Review);
-        SetApproved(Review."Review No.", 'T1', 2);
+        CreateSentReview(Review);
+        BCJTestLibrary.SetApprovedHours(Review."Review No.", 'T1', 2);
         CustomerReviewMgt.SubmitReview(Review);
         // [WHEN] The consultant tries to cancel it
         Review.Get(Review."Review No.");
@@ -929,69 +1299,149 @@ codeunit 50154 "BCJ Customer Review Tests"
         Commit();
         asserterror CustomerReviewMgt.CancelReview(Review);
         // [THEN] Refused, and the answer stands
-        Assert.ExpectedErrorCode('TestField');
         Review.Get(Review."Review No.");
         Assert.AreEqual("BCJ Review Status"::Answered, Review.Status, 'An answered review must stay Answered when a cancel is refused');
-        AssertEntry('E1', "BCJ Billing Status"::Billable, 2, Review."Review No.", 'A refused cancel must not release an entry the customer already approved');
+        AssertBuckets('E1', 0, 0, 2, 0, 0, 'A refused cancel must not release hours the customer already approved');
     end;
 
     [Test]
-    procedure ReopenReview_RestoresEntriesAndKeepsApprovedHours()
+    procedure DeleteDraftReview_ReleasesItsHours()
+    var
+        Review: Record "BCJ Customer Review";
+        ReviewNo: Integer;
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] Contract, table 50103: "A Draft or Cancelled review may be deleted; deleting a
+        // Draft releases its hours to Open first." A consultant who throws a draft away must get
+        // the hours back - deleting the review without releasing would reserve them in a review
+        // that no longer exists, where nothing can ever reach them again.
+        // [GIVEN] A draft review holding 3 hours
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        ReviewNo := Review."Review No.";
+        // [WHEN] The draft is deleted
+        Review.Delete(true);
+        // [THEN] The review is gone and the hours are Open
+        Assert.IsFalse(Review.Get(ReviewNo), 'The draft must be deleted');
+        AssertBuckets('E1', 3, 0, 0, 0, 0, 'Deleting a draft must release its hours to Open');
+        AssertOwnInvariant('After deleting a draft');
+    end;
+
+    [Test]
+    procedure DeleteSentReview_IsRefused()
+    var
+        Review: Record "BCJ Customer Review";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] Only Draft and Cancelled reviews may be deleted. A sent review is out with the
+        // customer and holds their pending answer; deleting it would strand its hours in review
+        // and leave the customer holding a dead link.
+        // [GIVEN] A sent review
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
+        CreateSentReview(Review);
+        // [WHEN] It is deleted
+        // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
+        Commit();
+        asserterror Review.Delete(true);
+        // [THEN] Refused; the review and its reservation are intact
+        Assert.IsTrue(Review.Get(Review."Review No."), 'A sent review must not be deletable');
+        AssertBuckets('E1', 0, 3, 0, 0, 0, 'A refused delete must leave the hours in review');
+    end;
+
+    [Test]
+    procedure ReopenReview_MovesApprovedHoursBackInReviewAndKeepsTheAnswer()
     var
         Review: Record "BCJ Customer Review";
         ReviewLine: Record "BCJ Customer Review Line";
         JobNo: Code[20];
     begin
         // [SCENARIO] The customer answers, then phones to say they meant something else. Reopen
-        // puts the hours back in review and undoes the allocation, but keeps what they approved
-        // and wrote - the consultant needs to see the original answer to discuss it, and typing it
-        // in again would lose the customer's own words. Submitting again must then apply cleanly,
-        // not on top of the first allocation.
-        // [GIVEN] An answered review where 4 of 5 hours were approved
+        // (contract: ReReserveReview(Hours to Bill)) puts the review's approved hours back in
+        // review and tops up, oldest first, from the Open hours of its own worklogs until the
+        // review again holds the Hours to Bill it asked for. What the customer approved is kept
+        // for discussion, and submitting the same answer again must give the same allocation,
+        // not a doubled one.
+        // [GIVEN] An answered review over OLD 2 h and NEW 3 h, asked 5, approved 4
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('OLD', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
         AddEntry('NEW', JobNo, 'T1', D() + 1, 3, "BCJ Billing Status"::Open);
-        CreateOneReview(Review);
-        SetApproved(Review."Review No.", 'T1', 4);
-        CustomerReviewMgt.SubmitReview(Review);
-        AssertEntry('OLD', "BCJ Billing Status"::Billable, 2, Review."Review No.", 'Fixture: the first answer must have been applied oldest first');
-        AssertEntry('NEW', "BCJ Billing Status"::Billable, 2, Review."Review No.", 'Fixture: the first answer must have been applied oldest first');
+        CreateSentReview(Review);
+        BCJTestLibrary.SetApprovedHours(Review."Review No.", 'T1', 4);
+        BCJTestLibrary.SubmitAnswer(Review);
+        AssertBuckets('OLD', 0, 0, 2, 0, 0, 'Fixture: the first answer must have been applied oldest first');
+        AssertBuckets('NEW', 1, 0, 2, 0, 0, 'Fixture: the unapproved hour must have returned to Open');
         // [WHEN] The review is reopened
-        Review.Get(Review."Review No.");
         CustomerReviewMgt.ReopenReview(Review);
-        // [THEN] The hours are back in review with their full allocation, the answer is kept
+        // [THEN] Sent again, all 5 hours back in review, the answer kept
         Review.Get(Review."Review No.");
         Assert.AreEqual("BCJ Review Status"::Sent, Review.Status, 'A reopened review must be Sent again, waiting for a new answer');
         Assert.AreEqual(0DT, Review."Answered On", 'A reopened review must no longer claim to have been answered');
-        AssertEntry('OLD', "BCJ Billing Status"::"Sent for Review", 2, Review."Review No.", 'A reopened entry must be back in review with its full logged hours allocated');
-        AssertEntry('NEW', "BCJ Billing Status"::"Sent for Review", 3, Review."Review No.", 'A reopened entry must be back in review with its full logged hours allocated');
+        AssertBuckets('OLD', 0, 2, 0, 0, 0, 'The approved hours of the older worklog must be back in review');
+        AssertBuckets('NEW', 0, 3, 0, 0, 0, 'The approved hours plus the released hour must be back in review, up to Hours to Bill');
         ReviewLine.Get(Review."Review No.", 'T1');
         Assert.AreEqual(0.0, ReviewLine."Applied Hours", 'A reopened line must show nothing as applied, because the allocation was undone');
         Assert.AreEqual(4.0, ReviewLine."Approved Hours", 'A reopened line must keep what the customer approved, so it can be discussed and adjusted');
+        AssertOwnInvariant('After Reopen');
         // [WHEN] It is submitted again unchanged
-        Review.Get(Review."Review No.");
-        CustomerReviewMgt.SubmitReview(Review);
+        BCJTestLibrary.SubmitAnswer(Review);
         // [THEN] The same allocation is produced again, not doubled
-        Review.Get(Review."Review No.");
         Assert.AreEqual("BCJ Review Status"::Answered, Review.Status, 'A reopened review must be answerable again');
-        AssertEntry('OLD', "BCJ Billing Status"::Billable, 2, Review."Review No.", 'Re-applying the same answer must give the same allocation as the first time');
-        AssertEntry('NEW', "BCJ Billing Status"::Billable, 2, Review."Review No.", 'Re-applying the same answer must give the same allocation as the first time');
+        AssertBuckets('OLD', 0, 0, 2, 0, 0, 'Re-applying the same answer must give the same allocation as the first time');
+        AssertBuckets('NEW', 1, 0, 2, 0, 0, 'Re-applying the same answer must give the same allocation as the first time');
         ReviewLine.Get(Review."Review No.", 'T1');
         Assert.AreEqual(4.0, ReviewLine."Applied Hours", 'Re-applying the same answer must apply the approved hours once, not twice');
     end;
 
     [Test]
-    procedure ReopenReview_OnSentReviewIsRejected()
+    procedure ReopenReview_WhenHoursNoLongerAvailableErrorsAndChangesNothing()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        FirstReview: Record "BCJ Customer Review";
+        SecondReview: Record "BCJ Customer Review";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] Contract, ReopenReview: "if any line reaches less than its Hours to Bill the
+        // reopen errors and nothing changes". The hours the customer did not approve went back to
+        // Open and may meanwhile sit in another review. Reopening must not steal them from that
+        // review, and must not leave a half-reopened review asking for hours it no longer holds.
+        // [GIVEN] A 4 h worklog, asked 4, approved 2; the 2 Open hours then reserved in a new draft
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 4, "BCJ Billing Status"::Open);
+        BCJTestLibrary.ReviewSingleEntry(JiraId('E1'), 4, 2, FirstReview);
+        FilterOwnProjects(TimeEntry);
+        BCJTestLibrary.CreateDraftReview(TimeEntry, SecondReview);
+        // [WHEN] The first review is reopened
+        // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
+        Commit();
+        asserterror CustomerReviewMgt.ReopenReview(FirstReview);
+        // [THEN] Refused; both reviews and the worklog are exactly as before
+        FirstReview.Get(FirstReview."Review No.");
+        Assert.AreEqual("BCJ Review Status"::Answered, FirstReview.Status, 'A reopen that cannot restore its Hours to Bill must leave the review Answered');
+        BCJTestLibrary.AssertRow(JiraId('E1'), FirstReview."Review No.", 0, 2, 0, 0, 'The approved hours must stay approved when the reopen is refused');
+        BCJTestLibrary.AssertRow(JiraId('E1'), SecondReview."Review No.", 2, 0, 0, 0, 'The other review must keep its reserved hours');
+        AssertBuckets('E1', 0, 2, 2, 0, 0, 'A refused reopen must not move any hour');
+    end;
+
+    [Test]
+    procedure ReopenReview_OnSentOrDraftReviewIsRejected()
     var
         Review: Record "BCJ Customer Review";
         JobNo: Code[20];
     begin
-        // [SCENARIO] Reopen exists to undo an applied answer. On a review the customer has not
-        // answered yet there is nothing to undo, and running it would clear approved hours and
-        // stamps for no reason. The consultant who wants those hours back uses Cancel.
-        // [GIVEN] A review that is still out with the customer
+        // [SCENARIO] Reopen exists to undo an applied answer (Answered -> Sent). On a review the
+        // customer has not answered there is nothing to undo; the consultant who wants the hours
+        // back uses Cancel.
+        // [GIVEN] A draft review
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
@@ -1002,32 +1452,38 @@ codeunit 50154 "BCJ Customer Review Tests"
         Commit();
         asserterror CustomerReviewMgt.ReopenReview(Review);
         // [THEN] Refused, and nothing about the review changed
-        Assert.ExpectedErrorCode('TestField');
+        Review.Get(Review."Review No.");
+        Assert.AreEqual("BCJ Review Status"::Draft, Review.Status, 'A draft must stay a draft when a reopen is refused');
+        AssertBuckets('E1', 0, 2, 0, 0, 0, 'A refused reopen must leave the hours in review');
+        // [WHEN] It is sent and then reopened
+        BCJTestLibrary.SendDraftReview(Review);
+        // Commit so the sent state survives the next asserterror rollback.
+        Commit();
+        asserterror CustomerReviewMgt.ReopenReview(Review);
+        // [THEN] Refused as well
         Review.Get(Review."Review No.");
         Assert.AreEqual("BCJ Review Status"::Sent, Review.Status, 'A review still waiting for an answer must stay Sent when a reopen is refused');
-        AssertEntry('E1', "BCJ Billing Status"::"Sent for Review", 2, Review."Review No.", 'A refused reopen must leave the entries in review exactly as they were');
+        AssertBuckets('E1', 0, 2, 0, 0, 0, 'A refused reopen must leave the hours in review');
     end;
 
     // ---------------------------------------------------------------------------------
-    // Interaction with the existing status handling
+    // Interaction with the overview actions
     // ---------------------------------------------------------------------------------
 
     [Test]
-    procedure SetBillingStatus_SkipsEntriesSentForReview()
+    procedure SetBillingStatus_SkipsHoursInReview()
     var
         TimeEntry: Record "BCJ Project Time Entry";
-        TempReview: Record "BCJ Customer Review" temporary;
         Review: Record "BCJ Customer Review";
         JobNo: Code[20];
         Changed: Integer;
         InReview: Integer;
     begin
-        // [SCENARIO] "Mark as Billable" over a project must not overrule a review that is out with
-        // the customer: deciding those hours behind the customer's back would make the answer,
-        // when it arrives, contradict what was already invoiced. They are skipped silently and are
-        // not counted as changed, and CountEntriesInReview is what tells the consultant why the
-        // number they got back is smaller than the number of lines they selected.
-        // [GIVEN] A project with an Open entry, an already Billable entry and an entry out for review
+        // [SCENARIO] "Mark as Billable" over a project must not overrule a review: deciding hours
+        // behind the customer's back would make the answer contradict what was already decided.
+        // SetBillingStatus never touches In Review hours; they are not counted as changed, and
+        // CountEntriesInReview tells the consultant why the count is smaller than the selection.
+        // [GIVEN] A project with an Open entry, an already Billable entry and an entry in a review
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
@@ -1037,65 +1493,36 @@ codeunit 50154 "BCJ Customer Review Tests"
         AddEntry('INREVIEW', JobNo, 'T2', D(), 3, "BCJ Billing Status"::Open);
         FilterOwnProjects(TimeEntry);
         TimeEntry.SetRange("Project Task No.", 'T2');
-        CustomerReviewMgt.CreateReviews(TimeEntry, TempReview);
-        TempReview.FindFirst();
-        Review.Get(TempReview."Review No.");
+        BCJTestLibrary.CreateDraftReview(TimeEntry, Review);
         // [WHEN] The whole project is marked Billable
         FilterOwnProjects(TimeEntry);
         Changed := BillingMgt.SetBillingStatus(TimeEntry, "BCJ Billing Status"::Billable);
         // [THEN] The entry in review is neither changed nor counted, and is reported separately
-        Assert.AreEqual(1, Changed, 'Only the Open entry may be changed and counted: the Billable one already had the status and the one in review must be skipped');
-        AssertEntry('OPEN', "BCJ Billing Status"::Billable, 1, 0, 'An Open entry outside any review must take the new status');
-        AssertEntry('BILLABLE', "BCJ Billing Status"::Billable, 2, 0, 'An already Billable entry must keep its status');
-        AssertEntry('INREVIEW', "BCJ Billing Status"::"Sent for Review", 3, Review."Review No.", 'An entry out for customer review must not be re-decided behind the customer back');
+        Assert.AreEqual(1, Changed, 'Only the Open entry may be changed and counted');
+        AssertBuckets('OPEN', 0, 0, 1, 0, 0, 'An Open entry outside any review must become Billable');
+        AssertBuckets('BILLABLE', 0, 0, 2, 0, 0, 'An already Billable entry must keep its hours');
+        AssertBuckets('INREVIEW', 0, 3, 0, 0, 0, 'Hours in a customer review must not be re-decided behind the customer''s back');
         FilterOwnProjects(TimeEntry);
         InReview := BillingMgt.CountEntriesInReview(TimeEntry);
-        Assert.AreEqual(1, InReview, 'CountEntriesInReview must report the entries that were skipped because they are out for review');
+        Assert.AreEqual(1, InReview, 'CountEntriesInReview must report the entries holding hours in review');
     end;
 
     [Test]
-    procedure SyncStatusFromLegacyFlags_LeavesSentForReviewEntriesUntouched()
-    var
-        TimeEntry: Record "BCJ Project Time Entry";
-        Review: Record "BCJ Customer Review";
-        JobNo: Code[20];
-    begin
-        // [SCENARIO] The legacy Jira Time Entries page can still set Is Billed with a plain
-        // ModifyAll, and the sync normally promotes such an entry to Billed whatever status it
-        // has. An entry out for customer review is the one exception: promoting it would decide
-        // hours the customer is still looking at and would leave the review pointing at entries
-        // that are no longer in it.
-        // [GIVEN] An entry out for review whose legacy Is Billed flag gets set
-        Initialize();
-        JobNo := CreateProject('P1', CreateCustomer('C'));
-        CreateTask(JobNo, 'T1');
-        AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
-        CreateOneReview(Review);
-        GetEntry('E1', TimeEntry);
-        BCJTestLibrary.SetLegacyFlags(TimeEntry, false, true);
-        // [WHEN] The legacy flag sync runs
-        BillingMgt.SyncStatusFromLegacyFlags();
-        // [THEN] The entry is still out for review, with its review link and allocation intact
-        AssertEntry('E1', "BCJ Billing Status"::"Sent for Review", 2, Review."Review No.", 'A legacy Is Billed flag must not pull an entry out of an open customer review');
-    end;
-
-    [Test]
-    procedure TimeEntry_InsertDefaultsBillableHoursToLoggedHours()
+    procedure TimeEntry_InsertStartsWithAllHoursOpen()
     var
         TimeEntry: Record "BCJ Project Time Entry";
         Stored: Record "BCJ Project Time Entry";
         JobNo: Code[20];
     begin
-        // [SCENARIO] Billable Hours carries what the customer agreed to pay for, and every other
-        // number in the overview is computed from it. A freshly synced worklog has not been
-        // reviewed, so it is fully billable until someone says otherwise - a zero here would make
-        // new hours vanish from the billable totals the day they are synced. A value already set
-        // by the caller is a deliberate allocation and must be kept.
+        // [SCENARIO] Contract: "On insert: Open = Unbilled = L, all other buckets 0, status Open.
+        // Billable Hours no longer defaults to L." A freshly synced worklog is undecided - calling
+        // it Billable would let it be invoiced without anyone approving it. The buckets are written
+        // only by the allocation codeunit, so a value a caller put in Billable Hours is not kept.
         // [GIVEN] A project and task
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
-        // [WHEN] An entry is inserted with validation and no allocation of its own
+        // [WHEN] An entry is inserted with triggers
         TimeEntry.Init();
         TimeEntry."Jira ID" := JiraId('E1');
         TimeEntry."Jira Issue Id" := CopyStr('I-' + JiraId('E1'), 1, 50);
@@ -1103,12 +1530,15 @@ codeunit 50154 "BCJ Customer Review Tests"
         TimeEntry."Project Task No." := 'T1';
         TimeEntry."Posting Date" := D();
         TimeEntry."Time Spent in Hours" := 2.5;
-        TimeEntry."Billing Status" := "BCJ Billing Status"::Open;
         TimeEntry.Insert(true);
-        // [THEN] The whole logged time is billable
+        // [THEN] Every hour is Open and Unbilled, nothing is Billable
         Stored.Get(JiraId('E1'), CopyStr('I-' + JiraId('E1'), 1, 50));
-        Assert.AreEqual(2.5, Stored."Billable Hours", 'A newly synced worklog must be fully billable until a review says otherwise');
-        // [WHEN] An entry is inserted that already carries an allocation
+        Assert.AreEqual(2.5, Stored."Open Hours", 'A newly synced worklog must be fully Open');
+        Assert.AreEqual(2.5, Stored."Unbilled Hours", 'A newly synced worklog must be fully Unbilled');
+        Assert.AreEqual(0.0, Stored."Billable Hours", 'A newly synced worklog must not be Billable until someone approves it');
+        Assert.AreEqual(0.0, Stored."In Review Hours", 'A newly synced worklog must not be in review');
+        Assert.AreEqual("BCJ Billing Status"::Open, Stored."Billing Status", 'A newly synced worklog must show Open');
+        // [WHEN] An entry is inserted with a Billable Hours value already set by the caller
         TimeEntry.Init();
         TimeEntry."Jira ID" := JiraId('E2');
         TimeEntry."Jira Issue Id" := CopyStr('I-' + JiraId('E2'), 1, 50);
@@ -1117,112 +1547,78 @@ codeunit 50154 "BCJ Customer Review Tests"
         TimeEntry."Posting Date" := D();
         TimeEntry."Time Spent in Hours" := 4;
         TimeEntry."Billable Hours" := 1;
-        TimeEntry."Billing Status" := "BCJ Billing Status"::Open;
         TimeEntry.Insert(true);
-        // [THEN] The allocation the caller set is kept
+        // [THEN] The insert still starts it fully Open
         Stored.Get(JiraId('E2'), CopyStr('I-' + JiraId('E2'), 1, 50));
-        Assert.AreEqual(1.0, Stored."Billable Hours", 'An allocation supplied by the caller must survive the insert, not be overwritten by the logged hours');
-    end;
-
-    [Test]
-    procedure TimeEntry_ValidateLoggedHoursUpdatesBillableHours()
-    var
-        TimeEntry: Record "BCJ Project Time Entry";
-        JobNo: Code[20];
-    begin
-        // [SCENARIO] The sync rewrites logged hours when a consultant corrects a worklog in Jira.
-        // On an undecided entry the allocation simply follows, since nobody has decided anything
-        // yet. On a decided entry the agreed allocation must be left alone - unless it now exceeds
-        // the hours that exist, which would let an entry be billable for more than it logs.
-        // [GIVEN] An Open entry of 2 hours, a Billable entry fully allocated, and a Billable entry
-        // allocated below its logged hours
-        Initialize();
-        JobNo := CreateProject('P1', CreateCustomer('C'));
-        CreateTask(JobNo, 'T1');
-        AddEntry('OPEN', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
-        AddEntry('FULL', JobNo, 'T1', D(), 4, "BCJ Billing Status"::Billable);
-        AddEntry('PART', JobNo, 'T1', D(), 4, "BCJ Billing Status"::Billable);
-        SetBillableHours('PART', 1);
-        // [WHEN] The logged hours of the Open entry are corrected upwards
-        GetEntry('OPEN', TimeEntry);
-        TimeEntry.Validate("Time Spent in Hours", 5);
-        TimeEntry.Modify(true);
-        // [THEN] The allocation follows the new logged hours
-        Assert.AreEqual(5.0, GetBillableHours('OPEN'), 'On an undecided entry the billable hours must follow the corrected logged hours');
-        // [WHEN] The logged hours of a fully allocated Billable entry are corrected downwards
-        GetEntry('FULL', TimeEntry);
-        TimeEntry.Validate("Time Spent in Hours", 1.5);
-        TimeEntry.Modify(true);
-        // [THEN] The allocation is clamped to what is left
-        Assert.AreEqual(1.5, GetBillableHours('FULL'), 'A decided entry must never stay billable for more hours than it now logs');
-        // [WHEN] The logged hours of a partly allocated Billable entry are corrected downwards but stay above the allocation
-        GetEntry('PART', TimeEntry);
-        TimeEntry.Validate("Time Spent in Hours", 3);
-        TimeEntry.Modify(true);
-        // [THEN] The agreed allocation is left alone
-        Assert.AreEqual(1.0, GetBillableHours('PART'), 'A correction that still covers the agreed allocation must not change what was agreed');
+        Assert.AreEqual(4.0, Stored."Open Hours", 'Insert must start every worklog fully Open whatever the caller put in the buckets');
+        Assert.AreEqual(0.0, Stored."Billable Hours", 'Insert must reset Billable Hours - only the allocation codeunit writes buckets');
     end;
 
     // ---------------------------------------------------------------------------------
-    // Overview hours
+    // Overview hours - read from the bucket cache
     // ---------------------------------------------------------------------------------
 
     [Test]
-    procedure Overview_BillableEntrySplitsAllocatedAndUnallocatedHours()
+    procedure Overview_PartlyApprovedEntryIsBillableAndOpen()
     var
         Buffer: Record "BCJ Billing Overview Buffer" temporary;
         TimeEntryFilter: Record "BCJ Project Time Entry";
+        Review: Record "BCJ Customer Review";
         CustomerNo: Code[20];
         JobNo: Code[20];
     begin
-        // [SCENARIO] After a review, a Billable entry carries two different numbers: the hours the
-        // customer agreed to pay for and the hours worked. The overview must show both sides -
-        // the agreed hours as billable, the rest as not billable - so the difference between what
-        // was worked and what will be invoiced is visible instead of silently disappearing.
-        // [GIVEN] A billable entry of 3 logged hours with 1.5 hours agreed
+        // [SCENARIO] After a partial approval one worklog carries two buckets: the approved hours
+        // are Billable, the rest is Open for the consultant to decide on. The overview must show
+        // both, and both are still Unbilled - nothing has been invoiced or written off yet.
+        // [GIVEN] A 3 h worklog of which the customer approved 1.5
         Initialize();
         CustomerNo := CreateCustomer('C');
         JobNo := CreateProject('P1', CustomerNo);
         CreateTask(JobNo, 'T1');
-        AddEntry('E1', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Billable);
-        SetBillableHours('E1', 1.5);
+        AddEntry('E1', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
+        BCJTestLibrary.ReviewSingleEntry(JiraId('E1'), 3, 1.5, Review);
         // [WHEN] The overview is built
         FilterOwnProjects(TimeEntryFilter);
         OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, true);
-        // [THEN] Total 3, billable 1.5, the remaining 1.5 not billable, unbilled 1.5
+        // [THEN] Total 3, Open 1.5, Billable 1.5, Unbilled 3
         FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T1');
-        AssertHours(Buffer, 3, 0, 0, 1.5, 1.5, 0, 1.5, 'Task with a partly agreed billable entry');
+        AssertHours(Buffer, 3, 1.5, 0, 1.5, 0, 0, 3, 'Task with a partly approved worklog');
+        FindEntryLine(Buffer, 'E1');
+        AssertHours(Buffer, 3, 1.5, 0, 1.5, 0, 0, 3, 'Partly approved worklog');
         FindLine(Buffer, LineType::Project, CustomerNo, JobNo, '');
-        AssertHours(Buffer, 3, 0, 0, 1.5, 1.5, 0, 1.5, 'Project with a partly agreed billable entry');
+        AssertHours(Buffer, 3, 1.5, 0, 1.5, 0, 0, 3, 'Project with a partly approved worklog');
     end;
 
     [Test]
-    procedure Overview_BilledEntrySplitsBilledAndNotBilledHours()
+    procedure Overview_InvoicedAndWrittenOffPartsOfOneEntry()
     var
         Buffer: Record "BCJ Billing Overview Buffer" temporary;
         TimeEntryFilter: Record "BCJ Project Time Entry";
+        Review: Record "BCJ Customer Review";
         CustomerNo: Code[20];
         JobNo: Code[20];
     begin
-        // [SCENARIO] Once invoiced, only the hours that were actually invoiced are Billed. The
-        // hours the customer struck off were worked and never charged, so they belong under Not
-        // Billable, and nothing of this entry is still waiting to be invoiced - a billed entry
-        // must add nothing to Unbilled, or the same hours would be chased twice.
-        // [GIVEN] A billed entry of 3 logged hours of which 1 was invoiced
+        // [SCENARIO] Business flow step 6: approved hours are billed after invoicing, the rest is
+        // written off. The worklog then holds Billed and Not Billable hours and nothing is still
+        // to be chased - it must add nothing to Unbilled, or the same hours are chased twice.
+        // [GIVEN] A 3 h worklog: 1 approved and invoiced, the 2 unapproved written off
         Initialize();
         CustomerNo := CreateCustomer('C');
         JobNo := CreateProject('P1', CustomerNo);
         CreateTask(JobNo, 'T1');
-        AddEntry('E1', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Billed);
-        SetBillableHours('E1', 1);
+        AddEntry('E1', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
+        BCJTestLibrary.ReviewSingleEntry(JiraId('E1'), 3, 1, Review);
+        BCJTestLibrary.MarkEntryById(JiraId('E1'), "BCJ Billing Status"::Billed);
+        BCJTestLibrary.MarkEntryById(JiraId('E1'), "BCJ Billing Status"::"Not Billable");
         // [WHEN] The overview is built
         FilterOwnProjects(TimeEntryFilter);
         OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, true);
-        // [THEN] Total 3, billed 1, not billable 2, nothing unbilled
+        // [THEN] Total 3, Billed 1, Not Billable 2, nothing unbilled
         FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T1');
-        AssertHours(Buffer, 3, 0, 0, 0, 2, 1, 0, 'Task with a partly invoiced billed entry');
+        AssertHours(Buffer, 3, 0, 0, 0, 2, 1, 0, 'Task with an invoiced and written-off worklog');
         FindLine(Buffer, LineType::Project, CustomerNo, JobNo, '');
-        AssertHours(Buffer, 3, 0, 0, 0, 2, 1, 0, 'Project with a partly invoiced billed entry');
+        AssertHours(Buffer, 3, 0, 0, 0, 2, 1, 0, 'Project with an invoiced and written-off worklog');
+        AssertStatus('E1', "BCJ Billing Status"::Billed, 'A worklog with Billed and Not Billable hours shows Billed (precedence Billed over Not Billable)');
     end;
 
     [Test]
@@ -1234,11 +1630,10 @@ codeunit 50154 "BCJ Customer Review Tests"
         CustomerNo: Code[20];
         JobNo: Code[20];
     begin
-        // [SCENARIO] Hours out with the customer are undecided but not forgotten: they get their
-        // own bucket so the consultant can see what is waiting on an answer, and they still count
-        // as unbilled, because they are money the firm expects to invoice once the answer comes.
-        // Dropping them out of Unbilled would make the work in progress look smaller than it is.
-        // [GIVEN] An open entry of 4 hours that is sent for customer review
+        // [SCENARIO] Hours in a review are undecided but not forgotten: they get their own bucket
+        // so the consultant can see what is waiting on an answer, and they still count as
+        // unbilled, because they are money the firm expects to invoice once the answer comes.
+        // [GIVEN] An open entry of 4 hours that is put in a review
         Initialize();
         CustomerNo := CreateCustomer('C');
         JobNo := CreateProject('P1', CustomerNo);
@@ -1250,9 +1645,9 @@ codeunit 50154 "BCJ Customer Review Tests"
         OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, true);
         // [THEN] All 4 hours sit in Sent for Review, and Unbilled still includes them
         FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T1');
-        AssertHours(Buffer, 4, 0, 4, 0, 0, 0, 4, 'Task whose hours are out for customer review');
+        AssertHours(Buffer, 4, 0, 4, 0, 0, 0, 4, 'Task whose hours are in review');
         FindLine(Buffer, LineType::Customer, CustomerNo, '', '');
-        AssertHours(Buffer, 4, 0, 4, 0, 0, 0, 4, 'Customer whose hours are out for customer review');
+        AssertHours(Buffer, 4, 0, 4, 0, 0, 0, 4, 'Customer whose hours are in review');
     end;
 
     [Test]
@@ -1261,17 +1656,16 @@ codeunit 50154 "BCJ Customer Review Tests"
         Buffer: Record "BCJ Billing Overview Buffer" temporary;
         TimeEntryFilter: Record "BCJ Project Time Entry";
         TimeEntry: Record "BCJ Project Time Entry";
-        TempReview: Record "BCJ Customer Review" temporary;
+        Review: Record "BCJ Customer Review";
         CustomerNo: Code[20];
         JobA: Code[20];
         JobB: Code[20];
-        LineName: Text;
     begin
         // [SCENARIO] The five buckets are how the overview is read: every logged hour is in
-        // exactly one of them, on every row of the tree. If they stop adding up to the total, the
-        // page is lying about where the work in progress sits - and nobody can tell which number
-        // is wrong. This is the invariant the bucket maths exists to protect.
-        // [GIVEN] One customer, two projects and all five states at once
+        // exactly one of them, on every row of the tree - including worklogs split across
+        // several buckets. If they stop adding up to the total, the page is lying about where the
+        // work in progress sits. Unbilled = Open + Sent for Review + Billable.
+        // [GIVEN] One customer, two projects and all five buckets at once, several inside one worklog
         Initialize();
         CustomerNo := CreateCustomer('C');
         JobA := CreateProject('P1', CustomerNo);
@@ -1280,44 +1674,29 @@ codeunit 50154 "BCJ Customer Review Tests"
         CreateTask(JobA, 'T2');
         CreateTask(JobB, 'T1');
         AddEntry('OPEN', JobA, 'T1', D(), 2, "BCJ Billing Status"::Open);
-        AddEntry('BILLABLE', JobA, 'T1', D(), 4, "BCJ Billing Status"::Billable);
-        SetBillableHours('BILLABLE', 2.5);
-        AddEntry('BILLED', JobA, 'T2', D(), 3, "BCJ Billing Status"::Billed);
-        SetBillableHours('BILLED', 1);
+        AddEntry('BILLABLE', JobA, 'T1', D(), 4, "BCJ Billing Status"::Open);
+        BCJTestLibrary.ReviewSingleEntry(JiraId('BILLABLE'), 4, 2.5, Review);
+        AddEntry('BILLED', JobA, 'T2', D(), 3, "BCJ Billing Status"::Open);
+        BCJTestLibrary.ReviewSingleEntry(JiraId('BILLED'), 3, 1, Review);
+        BCJTestLibrary.MarkEntryById(JiraId('BILLED'), "BCJ Billing Status"::Billed);
         AddEntry('NOTBILL', JobB, 'T1', D(), 1.5, "BCJ Billing Status"::"Not Billable");
         AddEntry('INREVIEW', JobB, 'T1', D(), 5, "BCJ Billing Status"::Open);
         FilterOwnProjects(TimeEntry);
         TimeEntry.SetRange("Jira ID", JiraId('INREVIEW'));
-        CustomerReviewMgt.CreateReviews(TimeEntry, TempReview);
+        BCJTestLibrary.CreateDraftReview(TimeEntry, Review);
         // [WHEN] The overview is built over the whole customer
         FilterOwnProjects(TimeEntryFilter);
         OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, true);
-        // [THEN] The customer row shows every state, and no row anywhere breaks the invariant
+        // [THEN] The customer row shows every bucket, and no row anywhere breaks the invariant
+        // Open 2 + 1.5 + 2 = 5.5, Sent for Review 5, Billable 2.5, Not Billable 1.5, Billed 1
         FindLine(Buffer, LineType::Customer, CustomerNo, '', '');
-        AssertHours(Buffer, 15.5, 2, 5, 2.5, 5, 1, 9.5, 'Customer with entries in all five states');
-        Buffer.Reset();
-        Buffer.FindSet();
-        repeat
-            LineName := StrSubstNo('%1 line %2 %3 %4 %5', Buffer."Line Type", Buffer."Customer No.", Buffer."Project No.", Buffer."Project Task No.", Buffer."Jira ID");
-            Assert.AreEqual(
-              Buffer."Total Hours",
-              Buffer."Open Hours" + Buffer."Sent for Review Hours" + Buffer."Billable Hours" + Buffer."Not Billable Hours" + Buffer."Billed Hours",
-              LineName + ': every logged hour must sit in exactly one bucket, so the five buckets must add up to Total Hours');
-            Assert.AreEqual(
-              Buffer."Unbilled Hours",
-              Buffer."Open Hours" + Buffer."Sent for Review Hours" + Buffer."Billable Hours",
-              LineName + ': Unbilled Hours must be everything not yet invoiced and not written off');
-        until Buffer.Next() = 0;
+        AssertHours(Buffer, 15.5, 5.5, 5, 2.5, 1.5, 1, 13, 'Customer with hours in all five buckets');
+        AssertBucketsBalanceOnEveryLine(Buffer);
+        AssertOwnInvariant('Overview fixture');
     end;
 
-    // ---------------------------------------------------------------------------------
-    // Overview hours - Sent for Review follows the review line's Hours to Bill
-    // (regression: lowering Hours to Bill left the overview showing the full logged hours as
-    // Sent for Review, overstating what is being asked from the customer)
-    // ---------------------------------------------------------------------------------
-
     [Test]
-    procedure Overview_SentForReviewFollowsLoweredHoursToBill()
+    procedure Overview_DraftShowsAllReservedHoursUntilSent()
     var
         Buffer: Record "BCJ Billing Overview Buffer" temporary;
         TimeEntryFilter: Record "BCJ Project Time Entry";
@@ -1325,13 +1704,10 @@ codeunit 50154 "BCJ Customer Review Tests"
         CustomerNo: Code[20];
         JobNo: Code[20];
     begin
-        // [SCENARIO] The business case behind the bug: 10 hours were logged, the consultant
-        // decided to charge only half and set 50% on the review. From that moment the customer is
-        // being asked for 5 hours, not 10 - so "Sent for Review" must show 5, the 5 hours the
-        // consultant chose not to charge must show as Not Billable (they were worked and will
-        // never be invoiced), and Unbilled must drop to 5. Showing 10 overstates the expected
-        // revenue by exactly the discount the consultant just gave. Total stays the hours worked.
-        // [GIVEN] A task with 6 h (older) and 4 h (newer) sent for review, 50% asked for
+        // [SCENARIO] Lowering Hours to Bill on a draft is a plan, not yet a decision: the cut hours
+        // only return to Open when the review is sent (business flow step 4). Until then the
+        // draft still reserves everything, so the overview shows all 10 hours in review.
+        // [GIVEN] A draft over 6 h + 4 h with Hours to Bill lowered to 5
         Initialize();
         CustomerNo := CreateCustomer('C');
         JobNo := CreateProject('P1', CustomerNo);
@@ -1339,22 +1715,17 @@ codeunit 50154 "BCJ Customer Review Tests"
         AddEntry('OLD', JobNo, 'T1', D(), 6, "BCJ Billing Status"::Open);
         AddEntry('NEW', JobNo, 'T1', D() + 1, 4, "BCJ Billing Status"::Open);
         CreateOneReview(Review);
-        CustomerReviewMgt.SetHoursToBillPct(Review, 50);
+        BCJTestLibrary.SetHoursToBill(Review."Review No.", 'T1', 5);
         // [WHEN] The overview is built
         FilterOwnProjects(TimeEntryFilter);
         OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, false);
-        // [THEN] Task, project and customer: Total 10, Sent for Review 5, Not Billable 5, Unbilled 5
+        // [THEN] All 10 hours are still in review
         FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T1');
-        AssertHours(Buffer, 10, 0, 5, 0, 5, 0, 5, 'Task whose review asks for 50% of 10 logged hours');
-        FindLine(Buffer, LineType::Project, CustomerNo, JobNo, '');
-        AssertHours(Buffer, 10, 0, 5, 0, 5, 0, 5, 'Project whose review asks for 50% of 10 logged hours');
-        FindLine(Buffer, LineType::Customer, CustomerNo, '', '');
-        AssertHours(Buffer, 10, 0, 5, 0, 5, 0, 5, 'Customer whose review asks for 50% of 10 logged hours');
-        AssertBucketsBalanceOnEveryLine(Buffer);
+        AssertHours(Buffer, 10, 0, 10, 0, 0, 0, 10, 'Task of a draft whose Hours to Bill was lowered but not yet sent');
     end;
 
     [Test]
-    procedure Overview_SentForReviewTimeEntryRowsCarryOldestFirstShare()
+    procedure Overview_AfterSendSentForReviewIsHoursToBillAndCutIsOpen()
     var
         Buffer: Record "BCJ Billing Overview Buffer" temporary;
         TimeEntryFilter: Record "BCJ Project Time Entry";
@@ -1362,13 +1733,11 @@ codeunit 50154 "BCJ Customer Review Tests"
         CustomerNo: Code[20];
         JobNo: Code[20];
     begin
-        // [SCENARIO] Hours to Bill is a per-task number, but the overview can show individual
-        // worklogs. The per-worklog split must be the one the approval will later produce - oldest
-        // first, each worklog capped at its own logged hours (see
-        // SetHoursToBillPct_FiftyPercentEndToEnd: the 6-hour entry carries all 5, the 4-hour one
-        // is written off). Any other split would show the consultant one picture before the
-        // customer answers and a different one after, for the same numbers.
-        // [GIVEN] A task with 6 h (older) and 4 h (newer) sent for review, 50% asked for
+        // [SCENARIO] The business case: 10 hours were logged, the consultant charges only half and
+        // sends 50%. From then on the customer is being asked for 5 hours, so Sent for Review is 5;
+        // the 5 hours cut are Open (the consultant still decides to write them off or keep them),
+        // and all 10 are still Unbilled. Total stays the hours worked.
+        // [GIVEN] A task with 6 h (older) and 4 h (newer), sent at 50%
         Initialize();
         CustomerNo := CreateCustomer('C');
         JobNo := CreateProject('P1', CustomerNo);
@@ -1377,22 +1746,27 @@ codeunit 50154 "BCJ Customer Review Tests"
         AddEntry('NEW', JobNo, 'T1', D() + 1, 4, "BCJ Billing Status"::Open);
         CreateOneReview(Review);
         CustomerReviewMgt.SetHoursToBillPct(Review, 50);
-        // [WHEN] The overview is built down to the worklogs
+        BCJTestLibrary.SendDraftReview(Review);
+        // [WHEN] The overview is built
         FilterOwnProjects(TimeEntryFilter);
         OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, true);
-        // [THEN] The older worklog carries all 5 requested hours, its remaining 1 is not billable
+        // [THEN] Task, project and customer: Total 10, Open 5, Sent for Review 5, Unbilled 10
+        FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T1');
+        AssertHours(Buffer, 10, 5, 5, 0, 0, 0, 10, 'Task sent at 50% of 10 logged hours');
+        FindLine(Buffer, LineType::Project, CustomerNo, JobNo, '');
+        AssertHours(Buffer, 10, 5, 5, 0, 0, 0, 10, 'Project sent at 50% of 10 logged hours');
+        FindLine(Buffer, LineType::Customer, CustomerNo, '', '');
+        AssertHours(Buffer, 10, 5, 5, 0, 0, 0, 10, 'Customer sent at 50% of 10 logged hours');
+        // [THEN] Per worklog, oldest first: OLD 5 in review + 1 Open, NEW 4 Open
         FindEntryLine(Buffer, 'OLD');
-        AssertHours(Buffer, 6, 0, 5, 0, 1, 0, 5, 'Older worklog of a task asking for 5 of 10 hours');
-        Assert.AreEqual(5.0, Buffer."Allocated Hours", 'The older worklog must show the 5 requested hours as its allocated share, because it is filled first');
-        // [THEN] The newer worklog gets nothing of the request and is entirely not billable
+        AssertHours(Buffer, 6, 1, 5, 0, 0, 0, 6, 'Older worklog of a task sent for 5 of 10 hours');
         FindEntryLine(Buffer, 'NEW');
-        AssertHours(Buffer, 4, 0, 0, 0, 4, 0, 0, 'Newer worklog of a task asking for 5 of 10 hours');
-        Assert.AreEqual(0.0, Buffer."Allocated Hours", 'The newer worklog must show no allocated share, because the older one already absorbed the whole request');
+        AssertHours(Buffer, 4, 4, 0, 0, 0, 0, 4, 'Newer worklog of a task sent for 5 of 10 hours');
         AssertBucketsBalanceOnEveryLine(Buffer);
     end;
 
     [Test]
-    procedure Overview_SentForReviewShareSpillsIntoNewerEntry()
+    procedure Overview_AfterSendShareSpillsIntoNewerEntry()
     var
         Buffer: Record "BCJ Billing Overview Buffer" temporary;
         TimeEntryFilter: Record "BCJ Project Time Entry";
@@ -1400,10 +1774,10 @@ codeunit 50154 "BCJ Customer Review Tests"
         CustomerNo: Code[20];
         JobNo: Code[20];
     begin
-        // [SCENARIO] When the request is larger than the oldest worklog, that worklog is capped
-        // at its own logged hours and the rest spills into the next one - no worklog may ever be
-        // shown as asked for more than it logs, and none of the request may disappear.
-        // [GIVEN] A task with 6 h (older) and 4 h (newer) sent for review, 7 hours asked for
+        // [SCENARIO] When the request is larger than the oldest worklog, that worklog is kept in
+        // review completely and the rest spills into the next one - no worklog can hold more in
+        // review than it logs, and none of the request may disappear.
+        // [GIVEN] A task with 6 h (older) and 4 h (newer), sent asking for 7
         Initialize();
         CustomerNo := CreateCustomer('C');
         JobNo := CreateProject('P1', CustomerNo);
@@ -1411,23 +1785,22 @@ codeunit 50154 "BCJ Customer Review Tests"
         AddEntry('OLD', JobNo, 'T1', D(), 6, "BCJ Billing Status"::Open);
         AddEntry('NEW', JobNo, 'T1', D() + 1, 4, "BCJ Billing Status"::Open);
         CreateOneReview(Review);
-        SetHoursToBill(Review."Review No.", 'T1', 7);
+        BCJTestLibrary.SetHoursToBill(Review."Review No.", 'T1', 7);
+        BCJTestLibrary.SendDraftReview(Review);
         // [WHEN] The overview is built down to the worklogs
         FilterOwnProjects(TimeEntryFilter);
         OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, true);
-        // [THEN] Older 6 / 0, newer 1 / 3, task 7 / 3
+        // [THEN] Older 6 in review, newer 1 in review + 3 Open, task 7 + 3
         FindEntryLine(Buffer, 'OLD');
         AssertHours(Buffer, 6, 0, 6, 0, 0, 0, 6, 'Older worklog of a task asking for 7 of 10 hours');
-        Assert.AreEqual(6.0, Buffer."Allocated Hours", 'The older worklog must be filled up to its own logged hours and no further');
         FindEntryLine(Buffer, 'NEW');
-        AssertHours(Buffer, 4, 0, 1, 0, 3, 0, 1, 'Newer worklog of a task asking for 7 of 10 hours');
-        Assert.AreEqual(1.0, Buffer."Allocated Hours", 'The newer worklog must carry exactly what the older one could not');
+        AssertHours(Buffer, 4, 3, 1, 0, 0, 0, 4, 'Newer worklog of a task asking for 7 of 10 hours');
         FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T1');
-        AssertHours(Buffer, 10, 0, 7, 0, 3, 0, 7, 'Task asking for 7 of 10 hours');
+        AssertHours(Buffer, 10, 3, 7, 0, 0, 0, 10, 'Task asking for 7 of 10 hours');
     end;
 
     [Test]
-    procedure Overview_SentForReviewSamePostingDateSplitsInJiraIdOrder()
+    procedure Overview_SplitIsPerWorklogUnderDateFilter()
     var
         Buffer: Record "BCJ Billing Overview Buffer" temporary;
         TimeEntryFilter: Record "BCJ Project Time Entry";
@@ -1435,83 +1808,11 @@ codeunit 50154 "BCJ Customer Review Tests"
         CustomerNo: Code[20];
         JobNo: Code[20];
     begin
-        // [SCENARIO] Worklogs on the same day are the common case. The approval breaks that tie
-        // on Jira ID (SubmitReview_SamePostingDateAllocatesInJiraIdOrder), so the overview must
-        // too - otherwise the worklog shown as carrying the request is not the one that will be
-        // billed when the customer approves it.
-        // [GIVEN] Two 3-hour worklogs on the same day, 4 hours asked for
-        Initialize();
-        CustomerNo := CreateCustomer('C');
-        JobNo := CreateProject('P1', CustomerNo);
-        CreateTask(JobNo, 'T1');
-        AddEntry('A', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
-        AddEntry('B', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
-        CreateOneReview(Review);
-        SetHoursToBill(Review."Review No.", 'T1', 4);
-        // [WHEN] The overview is built down to the worklogs
-        FilterOwnProjects(TimeEntryFilter);
-        OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, true);
-        // [THEN] The lower Jira ID is filled first
-        FindEntryLine(Buffer, 'A');
-        AssertHours(Buffer, 3, 0, 3, 0, 0, 0, 3, 'Lower Jira ID worklog on a shared posting date');
-        Assert.AreEqual(3.0, Buffer."Allocated Hours", 'On equal posting dates the lower Jira ID must be filled first');
-        FindEntryLine(Buffer, 'B');
-        AssertHours(Buffer, 3, 0, 1, 0, 2, 0, 1, 'Higher Jira ID worklog on a shared posting date');
-        Assert.AreEqual(1.0, Buffer."Allocated Hours", 'On equal posting dates the higher Jira ID must carry only the remainder');
-    end;
-
-    [Test]
-    procedure Overview_SentForReviewZeroHoursToBillIsAllNotBillable()
-    var
-        Buffer: Record "BCJ Billing Overview Buffer" temporary;
-        TimeEntryFilter: Record "BCJ Project Time Entry";
-        Review: Record "BCJ Customer Review";
-        CustomerNo: Code[20];
-        JobNo: Code[20];
-    begin
-        // [SCENARIO] A goodwill task: the consultant asks the customer for nothing. None of those
-        // hours will ever be invoiced, so none of them may sit in Sent for Review or Unbilled -
-        // the whole task is Not Billable already while the review is out.
-        // [GIVEN] A task with 6 h and 4 h sent for review, 0 hours asked for
-        Initialize();
-        CustomerNo := CreateCustomer('C');
-        JobNo := CreateProject('P1', CustomerNo);
-        CreateTask(JobNo, 'T1');
-        AddEntry('OLD', JobNo, 'T1', D(), 6, "BCJ Billing Status"::Open);
-        AddEntry('NEW', JobNo, 'T1', D() + 1, 4, "BCJ Billing Status"::Open);
-        CreateOneReview(Review);
-        SetHoursToBill(Review."Review No.", 'T1', 0);
-        // [WHEN] The overview is built down to the worklogs
-        FilterOwnProjects(TimeEntryFilter);
-        OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, true);
-        // [THEN] Everything is Not Billable, nothing Sent for Review, nothing Unbilled
-        FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T1');
-        AssertHours(Buffer, 10, 0, 0, 0, 10, 0, 0, 'Task whose review asks for 0 hours');
-        FindLine(Buffer, LineType::Customer, CustomerNo, '', '');
-        AssertHours(Buffer, 10, 0, 0, 0, 10, 0, 0, 'Customer whose only review asks for 0 hours');
-        FindEntryLine(Buffer, 'OLD');
-        AssertHours(Buffer, 6, 0, 0, 0, 6, 0, 0, 'Older worklog of a task asking for 0 hours');
-        Assert.AreEqual(0.0, Buffer."Allocated Hours", 'A worklog of a task asking for 0 hours must show no allocated share');
-        FindEntryLine(Buffer, 'NEW');
-        AssertHours(Buffer, 4, 0, 0, 0, 4, 0, 0, 'Newer worklog of a task asking for 0 hours');
-        Assert.AreEqual(0.0, Buffer."Allocated Hours", 'A worklog of a task asking for 0 hours must show no allocated share');
-    end;
-
-    [Test]
-    procedure Overview_SentForReviewShareIgnoresPostingDateFilter()
-    var
-        Buffer: Record "BCJ Billing Overview Buffer" temporary;
-        TimeEntryFilter: Record "BCJ Project Time Entry";
-        Review: Record "BCJ Customer Review";
-        CustomerNo: Code[20];
-        JobNo: Code[20];
-    begin
-        // [SCENARIO] The request belongs to the whole review line, not to whatever period the
-        // consultant happens to be looking at. A worklog's share must be the same whether the
-        // overview shows the whole review or one day of it - if a date filter re-spread the
-        // request over only the visible worklogs, the same 5 requested hours would be counted
-        // once in each period and the periods together would promise more than was asked.
-        // [GIVEN] A task with 6 h (older, day D) and 4 h (newer, day D+1) sent for review, 50% asked for
+        // [SCENARIO] The overview reads each worklog's own buckets, so a worklog shows the same
+        // split whether the overview covers the whole review or one day of it. If a date filter
+        // re-spread the request over the visible worklogs only, the same 5 requested hours would
+        // be counted once per period and the periods together would promise more than was asked.
+        // [GIVEN] A task with 6 h (day D) and 4 h (day D+1), sent at 50%
         Initialize();
         CustomerNo := CreateCustomer('C');
         JobNo := CreateProject('P1', CustomerNo);
@@ -1520,31 +1821,27 @@ codeunit 50154 "BCJ Customer Review Tests"
         AddEntry('NEW', JobNo, 'T1', D() + 1, 4, "BCJ Billing Status"::Open);
         CreateOneReview(Review);
         CustomerReviewMgt.SetHoursToBillPct(Review, 50);
+        BCJTestLibrary.SendDraftReview(Review);
         // [WHEN] The overview is built for day D only
         FilterOwnProjects(TimeEntryFilter);
         TimeEntryFilter.SetRange("Posting Date", D());
         OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, true);
-        // [THEN] The older worklog shows its own share of the whole line: 5 / 1
+        // [THEN] The task shows the older worklog's own split: 5 in review, 1 Open
         FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T1');
-        AssertHours(Buffer, 6, 0, 5, 0, 1, 0, 5, 'Task filtered to the day of the older worklog');
-        FindEntryLine(Buffer, 'OLD');
-        Assert.AreEqual(5.0, Buffer."Allocated Hours", 'The older worklog must keep its share of the whole review line under a date filter');
+        AssertHours(Buffer, 6, 1, 5, 0, 0, 0, 6, 'Task filtered to the day of the older worklog');
         // [WHEN] The overview is built for day D+1 only
         Buffer.Reset();
         Buffer.DeleteAll();
         FilterOwnProjects(TimeEntryFilter);
         TimeEntryFilter.SetRange("Posting Date", D() + 1);
         OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, true);
-        // [THEN] The newer worklog shows its own share of the whole line, 0 - not the 4 a
-        // re-spread of the 5 requested hours over the visible worklog alone would give
+        // [THEN] The newer worklog's own split: nothing in review, 4 Open
         FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T1');
-        AssertHours(Buffer, 4, 0, 0, 0, 4, 0, 0, 'Task filtered to the day of the newer worklog');
-        FindEntryLine(Buffer, 'NEW');
-        Assert.AreEqual(0.0, Buffer."Allocated Hours", 'The newer worklog must keep its share of the whole review line under a date filter, not a share recomputed over the visible worklogs');
+        AssertHours(Buffer, 4, 4, 0, 0, 0, 0, 4, 'Task filtered to the day of the newer worklog');
     end;
 
     [Test]
-    procedure Overview_SentForReviewLoweringOneTaskLeavesOtherTaskAlone()
+    procedure Overview_CutOnOneTaskLeavesOtherTaskAlone()
     var
         Buffer: Record "BCJ Billing Overview Buffer" temporary;
         TimeEntryFilter: Record "BCJ Project Time Entry";
@@ -1554,9 +1851,8 @@ codeunit 50154 "BCJ Customer Review Tests"
     begin
         // [SCENARIO] Hours to Bill is decided per task: cutting one task is a decision about that
         // task only. The other task of the same review is still asked for in full, and the
-        // customer and project rows must add the two up correctly - the cut must neither leak
-        // into the other task nor be lost on the way up the tree.
-        // [GIVEN] One review over T1 (6 h + 4 h, 5 asked for) and T2 (3 h, asked for in full)
+        // customer and project rows must add the two up correctly.
+        // [GIVEN] One review over T1 (6 h + 4 h, 5 asked for) and T2 (3 h, asked in full), sent
         Initialize();
         CustomerNo := CreateCustomer('C');
         JobNo := CreateProject('P1', CustomerNo);
@@ -1566,71 +1862,68 @@ codeunit 50154 "BCJ Customer Review Tests"
         AddEntry('NEW', JobNo, 'T1', D() + 1, 4, "BCJ Billing Status"::Open);
         AddEntry('OTHER', JobNo, 'T2', D(), 3, "BCJ Billing Status"::Open);
         CreateOneReview(Review);
-        SetHoursToBill(Review."Review No.", 'T1', 5);
+        BCJTestLibrary.SetHoursToBill(Review."Review No.", 'T1', 5);
+        BCJTestLibrary.SendDraftReview(Review);
         // [WHEN] The overview is built down to the worklogs
         FilterOwnProjects(TimeEntryFilter);
         OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, true);
         // [THEN] T1 is cut, T2 is untouched, and project and customer add both up
         FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T1');
-        AssertHours(Buffer, 10, 0, 5, 0, 5, 0, 5, 'Task T1 asking for 5 of 10 hours');
+        AssertHours(Buffer, 10, 5, 5, 0, 0, 0, 10, 'Task T1 asking for 5 of 10 hours');
         FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T2');
         AssertHours(Buffer, 3, 0, 3, 0, 0, 0, 3, 'Task T2 asked for in full next to a cut task');
-        FindEntryLine(Buffer, 'OTHER');
-        Assert.AreEqual(3.0, Buffer."Allocated Hours", 'A worklog of a task asked for in full must show all of its hours as allocated');
         FindLine(Buffer, LineType::Project, CustomerNo, JobNo, '');
-        AssertHours(Buffer, 13, 0, 8, 0, 5, 0, 8, 'Project with one cut task and one full task');
+        AssertHours(Buffer, 13, 5, 8, 0, 0, 0, 13, 'Project with one cut task and one full task');
         FindLine(Buffer, LineType::Customer, CustomerNo, '', '');
-        AssertHours(Buffer, 13, 0, 8, 0, 5, 0, 8, 'Customer with one cut task and one full task');
+        AssertHours(Buffer, 13, 5, 8, 0, 0, 0, 13, 'Customer with one cut task and one full task');
         AssertBucketsBalanceOnEveryLine(Buffer);
     end;
 
     [Test]
-    procedure Overview_SentForReviewWithoutReviewLineKeepsFullHours()
+    procedure Overview_FollowsTheWholeLifecycleOfOneTask()
     var
         Buffer: Record "BCJ Billing Overview Buffer" temporary;
         TimeEntryFilter: Record "BCJ Project Time Entry";
         Review: Record "BCJ Customer Review";
-        ReviewLine: Record "BCJ Customer Review Line";
         CustomerNo: Code[20];
         JobNo: Code[20];
     begin
-        // [SCENARIO] An entry can be in "Sent for Review" without a review line to read the
-        // request from - legacy data with no Review No., or a line that has gone missing. With
-        // no request to go by, nothing may be written off in the overview: the full logged hours
-        // stay in Sent for Review, as before the fix. The lookup must also be keyed on review
-        // AND task, so a cut on another task of the same review must not be applied here.
-        // [GIVEN] One review over T1 (4 h, 0 asked for) and T2 (3 h) whose T2 line is then deleted
+        // [SCENARIO] BuildOverview reads the cached buckets on every level, so each step of the
+        // business flow is visible at once: sent (Sent for Review 5, cut 5 Open), answered with
+        // 3 of 5 approved (Billable 3, unapproved 2 back to Open), invoiced (Billed 3) and the
+        // rest written off (Not Billable 7, nothing Unbilled).
+        // [GIVEN] A task with 6 h (older) and 4 h (newer), sent asking for 5
         Initialize();
         CustomerNo := CreateCustomer('C');
         JobNo := CreateProject('P1', CustomerNo);
         CreateTask(JobNo, 'T1');
-        CreateTask(JobNo, 'T2');
-        CreateTask(JobNo, 'T3');
-        AddEntry('CUT', JobNo, 'T1', D(), 4, "BCJ Billing Status"::Open);
-        AddEntry('NOLINE', JobNo, 'T2', D(), 3, "BCJ Billing Status"::Open);
+        AddEntry('OLD', JobNo, 'T1', D(), 6, "BCJ Billing Status"::Open);
+        AddEntry('NEW', JobNo, 'T1', D() + 1, 4, "BCJ Billing Status"::Open);
         CreateOneReview(Review);
-        SetHoursToBill(Review."Review No.", 'T1', 0);
-        ReviewLine.Get(Review."Review No.", 'T2');
-        ReviewLine.Delete(false);
-        // [GIVEN] And a T3 entry of 2 h that is Sent for Review with no Review No. at all
-        AddEntry('NOREVIEW', JobNo, 'T3', D(), 2, "BCJ Billing Status"::"Sent for Review");
-        // [WHEN] The overview is built down to the worklogs
+        BCJTestLibrary.SetHoursToBill(Review."Review No.", 'T1', 5);
+        BCJTestLibrary.SendDraftReview(Review);
         FilterOwnProjects(TimeEntryFilter);
-        OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, true);
-        // [THEN] T1 follows its line, T2 and T3 keep all their hours in Sent for Review
-        FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T1');
-        AssertHours(Buffer, 4, 0, 0, 0, 4, 0, 0, 'Task T1 whose review line asks for 0 hours');
-        FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T2');
-        AssertHours(Buffer, 3, 0, 3, 0, 0, 0, 3, 'Task T2 whose review line is missing');
-        FindEntryLine(Buffer, 'NOLINE');
-        AssertHours(Buffer, 3, 0, 3, 0, 0, 0, 3, 'Worklog whose review line is missing');
-        FindLine(Buffer, LineType::Task, CustomerNo, JobNo, 'T3');
-        AssertHours(Buffer, 2, 0, 2, 0, 0, 0, 2, 'Task T3 whose entry is Sent for Review without a Review No.');
-        FindEntryLine(Buffer, 'NOREVIEW');
-        AssertHours(Buffer, 2, 0, 2, 0, 0, 0, 2, 'Worklog Sent for Review without a Review No.');
-        FindLine(Buffer, LineType::Customer, CustomerNo, '', '');
-        AssertHours(Buffer, 9, 0, 5, 0, 4, 0, 5, 'Customer with a cut task, a task without review line and a task without review');
-        AssertBucketsBalanceOnEveryLine(Buffer);
+        OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, false);
+        FindLine(Buffer, LineType::Project, CustomerNo, JobNo, '');
+        AssertHours(Buffer, 10, 5, 5, 0, 0, 0, 10, 'Project after Send');
+        // [WHEN] The customer approves 3
+        BCJTestLibrary.SetApprovedHours(Review."Review No.", 'T1', 3);
+        BCJTestLibrary.SubmitAnswer(Review);
+        OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, false);
+        // [THEN] 3 Billable, 7 Open, all still Unbilled
+        FindLine(Buffer, LineType::Project, CustomerNo, JobNo, '');
+        AssertHours(Buffer, 10, 7, 0, 3, 0, 0, 10, 'Project after the answer');
+        // [WHEN] The project is invoiced and the rest written off
+        FilterOwnProjects(TimeEntryFilter);
+        BillingMgt.SetBillingStatus(TimeEntryFilter, "BCJ Billing Status"::Billed);
+        FilterOwnProjects(TimeEntryFilter);
+        BillingMgt.SetBillingStatus(TimeEntryFilter, "BCJ Billing Status"::"Not Billable");
+        FilterOwnProjects(TimeEntryFilter);
+        OverviewMgt.BuildOverview(Buffer, TimeEntryFilter, false);
+        // [THEN] 3 Billed, 7 Not Billable, nothing Unbilled
+        FindLine(Buffer, LineType::Project, CustomerNo, JobNo, '');
+        AssertHours(Buffer, 10, 0, 0, 0, 7, 3, 0, 'Project after invoicing and write-off');
+        AssertOwnInvariant('End of the lifecycle');
     end;
 
     local procedure FindEntryLine(var Buffer: Record "BCJ Billing Overview Buffer" temporary; Suffix: Text)
@@ -1662,11 +1955,11 @@ codeunit 50154 "BCJ Customer Review Tests"
     end;
 
     // ---------------------------------------------------------------------------------
-    // GetOpenReviews
+    // GetOpenReviews - Draft and Sent reviews holding hours of the selection
     // ---------------------------------------------------------------------------------
 
     [Test]
-    procedure GetOpenReviews_OneSentReviewManyEntriesGivesOneReview()
+    procedure GetOpenReviews_OneReviewManyEntriesGivesOneReview()
     var
         TimeEntry: Record "BCJ Project Time Entry";
         TempOpenReview: Record "BCJ Customer Review" temporary;
@@ -1674,12 +1967,10 @@ codeunit 50154 "BCJ Customer Review Tests"
         JobNo: Code[20];
         Found: Integer;
     begin
-        // [SCENARIO] The consultant selects worklogs to see which review the customer is sitting
-        // on, typically to send a reminder. A review is one thing to chase no matter how many
-        // worklogs it covers: listing it once per entry would make the consultant remind the
-        // customer about the same review several times. Looking the review up is read-only - it
-        // must not move a single entry out of the review.
-        // [GIVEN] One Sent review holding three entries over two tasks
+        // [SCENARIO] The consultant selects worklogs to see which review holds them. A review is
+        // one thing to act on no matter how many worklogs it covers: listing it once per entry
+        // would duplicate it. Looking the review up is read-only.
+        // [GIVEN] One draft review holding three entries over two tasks
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
@@ -1692,15 +1983,61 @@ codeunit 50154 "BCJ Customer Review Tests"
         FilterOwnProjects(TimeEntry);
         Found := CustomerReviewMgt.GetOpenReviews(TimeEntry, TempOpenReview);
         // [THEN] Exactly the one review, once
-        Assert.AreEqual(1, Found, 'Several entries of one Sent review must count as exactly one open review');
-        Assert.AreEqual(1, TempOpenReview.Count(), 'Several entries of one Sent review must put that review into the result exactly once');
-        AssertHoldsReview(TempOpenReview, Review, 'The one Sent review must be in the result with its own Review No. and Project No.');
+        Assert.AreEqual(1, Found, 'Several entries of one review must count as exactly one open review');
+        Assert.AreEqual(1, TempOpenReview.Count(), 'Several entries of one review must put that review into the result exactly once');
+        AssertHoldsReview(TempOpenReview, Review, 'The one draft review must be in the result with its own Review No. and Project No.');
         // [THEN] Nothing was changed by looking
         Review.Get(Review."Review No.");
-        Assert.AreEqual("BCJ Review Status"::Sent, Review.Status, 'Looking up the open reviews must leave the review Sent');
-        AssertEntry('E1', "BCJ Billing Status"::"Sent for Review", 2, Review."Review No.", 'Looking up the open reviews must not change the entries in review');
-        AssertEntry('E2', "BCJ Billing Status"::"Sent for Review", 1, Review."Review No.", 'Looking up the open reviews must not change the entries in review');
-        AssertEntry('E3', "BCJ Billing Status"::"Sent for Review", 3, Review."Review No.", 'Looking up the open reviews must not change the entries in review');
+        Assert.AreEqual("BCJ Review Status"::Draft, Review.Status, 'Looking up the open reviews must leave the review a Draft');
+        AssertBuckets('E1', 0, 2, 0, 0, 0, 'Looking up the open reviews must not change the entries in review');
+        AssertBuckets('E2', 0, 1, 0, 0, 0, 'Looking up the open reviews must not change the entries in review');
+        AssertBuckets('E3', 0, 3, 0, 0, 0, 'Looking up the open reviews must not change the entries in review');
+    end;
+
+    [Test]
+    procedure GetOpenReviews_ReturnsDraftAndSentButNotAnswered()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        TempOpenReview: Record "BCJ Customer Review" temporary;
+        DraftReview: Record "BCJ Customer Review";
+        SentReview: Record "BCJ Customer Review";
+        AnsweredReview: Record "BCJ Customer Review";
+        CustomerNo: Code[20];
+        JobA: Code[20];
+        JobB: Code[20];
+        JobC: Code[20];
+    begin
+        // [SCENARIO] Contract: GetOpenReviews returns "the Draft and Sent reviews holding In Review
+        // hours of the entries within the filters". A draft still has to be sent and a sent review
+        // still has to be answered - both are open work. An answered review holds no hours in
+        // review any more and is done.
+        // [GIVEN] Three projects: one draft, one sent, one answered review
+        Initialize();
+        CustomerNo := CreateCustomer('C');
+        JobA := CreateProject('P1', CustomerNo);
+        JobB := CreateProject('P2', CustomerNo);
+        JobC := CreateProject('P3', CustomerNo);
+        CreateTask(JobA, 'T1');
+        CreateTask(JobB, 'T1');
+        CreateTask(JobC, 'T1');
+        AddEntry('A1', JobA, 'T1', D(), 2, "BCJ Billing Status"::Open);
+        AddEntry('B1', JobB, 'T1', D(), 3, "BCJ Billing Status"::Open);
+        AddEntry('C1', JobC, 'T1', D(), 4, "BCJ Billing Status"::Open);
+        FilterOwnProjects(TimeEntry);
+        TimeEntry.SetRange("Project No.", JobA);
+        BCJTestLibrary.CreateDraftReview(TimeEntry, DraftReview);
+        FilterOwnProjects(TimeEntry);
+        TimeEntry.SetRange("Project No.", JobB);
+        BCJTestLibrary.CreateDraftReview(TimeEntry, SentReview);
+        BCJTestLibrary.SendDraftReview(SentReview);
+        BCJTestLibrary.ReviewSingleEntry(JiraId('C1'), 4, 4, AnsweredReview);
+        // [WHEN] The open reviews are requested for the whole customer
+        FilterOwnProjects(TimeEntry);
+        // [THEN] The draft and the sent review, not the answered one
+        Assert.AreEqual(2, CustomerReviewMgt.GetOpenReviews(TimeEntry, TempOpenReview), 'The draft and the sent review must both count as open');
+        AssertHoldsReview(TempOpenReview, DraftReview, 'The draft review must be in the result');
+        AssertHoldsReview(TempOpenReview, SentReview, 'The sent review must be in the result');
+        Assert.IsFalse(TempOpenReview.Get(AnsweredReview."Review No."), 'An answered review must be left out of the result');
     end;
 
     [Test]
@@ -1717,11 +2054,10 @@ codeunit 50154 "BCJ Customer Review Tests"
         Found: Integer;
     begin
         // [SCENARIO] A selection over a customer can cover several projects, each with its own
-        // review. Every one of them is still waiting on the customer, so every one must be
-        // listed - dropping one would leave that project's hours unchased and unbilled. Project
-        // P2 is deliberately sent first, so its review has the lower number while its entries
+        // review. Every one of them is still open, so every one must be listed. Project P2 is
+        // deliberately put in review first, so its review has the lower number while its entries
         // sort after P1's: the result must not depend on which of the two is met first.
-        // [GIVEN] Two projects of one customer, P2 sent for review before P1
+        // [GIVEN] Two projects of one customer, P2 put in review before P1
         Initialize();
         CustomerNo := CreateCustomer('C');
         JobA := CreateProject('P1', CustomerNo);
@@ -1739,15 +2075,15 @@ codeunit 50154 "BCJ Customer Review Tests"
         CustomerReviewMgt.CreateReviews(TimeEntry, TempReview);
         GetReviewOfProject(JobA, ReviewA);
         GetReviewOfProject(JobB, ReviewB);
-        Assert.IsTrue(ReviewB."Review No." < ReviewA."Review No.", 'Fixture: the review sent first must have the lower Review No.');
+        Assert.IsTrue(ReviewB."Review No." < ReviewA."Review No.", 'Fixture: the review created first must have the lower Review No.');
         // [WHEN] The open reviews are requested for both projects
         FilterOwnProjects(TimeEntry);
         Found := CustomerReviewMgt.GetOpenReviews(TimeEntry, TempOpenReview);
         // [THEN] Both reviews, each once
-        Assert.AreEqual(2, Found, 'Two projects with one Sent review each must give two open reviews');
-        Assert.AreEqual(2, TempOpenReview.Count(), 'The result must hold exactly the two Sent reviews, each once');
-        AssertHoldsReview(TempOpenReview, ReviewA, 'The Sent review of project P1 must be in the result');
-        AssertHoldsReview(TempOpenReview, ReviewB, 'The Sent review of project P2 must be in the result');
+        Assert.AreEqual(2, Found, 'Two projects with one open review each must give two open reviews');
+        Assert.AreEqual(2, TempOpenReview.Count(), 'The result must hold exactly the two open reviews, each once');
+        AssertHoldsReview(TempOpenReview, ReviewA, 'The open review of project P1 must be in the result');
+        AssertHoldsReview(TempOpenReview, ReviewB, 'The open review of project P2 must be in the result');
     end;
 
     [Test]
@@ -1757,10 +2093,10 @@ codeunit 50154 "BCJ Customer Review Tests"
         TempOpenReview: Record "BCJ Customer Review" temporary;
         JobNo: Code[20];
     begin
-        // [SCENARIO] Hours that were never sent have no review. Review No. 0 is the absence of a
-        // review, not a review to look up - returning one here would hand the consultant a
-        // review to chase that does not exist.
-        // [GIVEN] Open and billable entries that were never sent for review
+        // [SCENARIO] Hours that were never put in a review have no review. The manual allocation
+        // row (Review No. 0) is the absence of a review, not a review to look up - returning one
+        // would hand the consultant a review that does not exist.
+        // [GIVEN] Open and billable entries that were never in a review
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
@@ -1780,24 +2116,22 @@ codeunit 50154 "BCJ Customer Review Tests"
         Review: Record "BCJ Customer Review";
         JobNo: Code[20];
     begin
-        // [SCENARIO] A cancelled review has been taken back; it must not be offered for chasing,
-        // or the customer is reminded about hours the consultant has withdrawn. An entry invoiced
-        // while the review was out keeps its link to the cancelled review, so the lookup must
-        // check the review status, not merely that the entry has a review number.
-        // [GIVEN] A cancelled review, one of whose entries was invoiced meanwhile and still points at it
+        // [SCENARIO] A cancelled review has been taken back; it must not be offered, or the
+        // customer is reminded about hours the consultant has withdrawn. The cancelled review
+        // still has allocation rows for its worklogs, so the lookup must go by hours in review and
+        // review status, not merely by the existence of a row.
+        // [GIVEN] A sent review, then cancelled
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
-        AddEntry('BILLED', JobNo, 'T1', D() + 1, 3, "BCJ Billing Status"::Open);
-        CreateOneReview(Review);
-        SetEntryStatus('BILLED', "BCJ Billing Status"::Billed);
+        AddEntry('E2', JobNo, 'T1', D() + 1, 3, "BCJ Billing Status"::Open);
+        CreateSentReview(Review);
         CustomerReviewMgt.CancelReview(Review);
-        AssertEntry('BILLED', "BCJ Billing Status"::Billed, 3, Review."Review No.", 'Fixture: the billed entry must still point at the cancelled review');
         // [WHEN] / [THEN] There is no open review
         FilterOwnProjects(TimeEntry);
-        Assert.AreEqual(0, CustomerReviewMgt.GetOpenReviews(TimeEntry, TempOpenReview), 'A cancelled review must never count as open, even when an entry still points at it');
-        Assert.IsTrue(TempOpenReview.IsEmpty(), 'A cancelled review must never be put into the result, even when an entry still points at it');
+        Assert.AreEqual(0, CustomerReviewMgt.GetOpenReviews(TimeEntry, TempOpenReview), 'A cancelled review must never count as open');
+        Assert.IsTrue(TempOpenReview.IsEmpty(), 'A cancelled review must never be put into the result');
     end;
 
     [Test]
@@ -1808,23 +2142,19 @@ codeunit 50154 "BCJ Customer Review Tests"
         Review: Record "BCJ Customer Review";
         JobNo: Code[20];
     begin
-        // [SCENARIO] Once the customer has answered there is nothing left to chase. Offering the
-        // review again would invite the customer to answer a second time, which the review
-        // refuses - so the consultant would be sending a reminder that only produces an error.
-        // Answered entries keep their Review No., so this again depends on the review status.
-        // [GIVEN] A review the customer has answered
+        // [SCENARIO] Once the customer has answered there is nothing left to chase - even when the
+        // answer approved only part of the hours and the worklog keeps a row for that review.
+        // Offering it again would invite a second answer, which the review refuses.
+        // [GIVEN] A review the customer has answered, approving 1 of 2 hours
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
-        CreateOneReview(Review);
-        SetApproved(Review."Review No.", 'T1', 2);
-        CustomerReviewMgt.SubmitReview(Review);
-        AssertEntry('E1', "BCJ Billing Status"::Billable, 2, Review."Review No.", 'Fixture: the answered entry must still point at its review');
+        BCJTestLibrary.ReviewSingleEntry(JiraId('E1'), 2, 1, Review);
         // [WHEN] / [THEN] There is no open review
         FilterOwnProjects(TimeEntry);
-        Assert.AreEqual(0, CustomerReviewMgt.GetOpenReviews(TimeEntry, TempOpenReview), 'An answered review must never count as open, even though its entries still point at it');
-        Assert.IsTrue(TempOpenReview.IsEmpty(), 'An answered review must never be put into the result, even though its entries still point at it');
+        Assert.AreEqual(0, CustomerReviewMgt.GetOpenReviews(TimeEntry, TempOpenReview), 'An answered review must never count as open');
+        Assert.IsTrue(TempOpenReview.IsEmpty(), 'An answered review must never be put into the result');
     end;
 
     [Test]
@@ -1839,8 +2169,8 @@ codeunit 50154 "BCJ Customer Review Tests"
         JobA: Code[20];
         JobB: Code[20];
     begin
-        // [SCENARIO] Across a customer some reviews come back and some do not. Only the ones
-        // still out are worth a reminder; including an answered one would chase the customer for
+        // [SCENARIO] Across a customer some reviews come back and some do not. Only the ones still
+        // out are worth a reminder; including an answered one would chase the customer for
         // something they have already done.
         // [GIVEN] Two projects sent together; the customer answers P1 but not P2
         Initialize();
@@ -1855,8 +2185,10 @@ codeunit 50154 "BCJ Customer Review Tests"
         CustomerReviewMgt.CreateReviews(TimeEntry, TempReview);
         GetReviewOfProject(JobA, ReviewA);
         GetReviewOfProject(JobB, ReviewB);
-        SetApproved(ReviewA."Review No.", 'T1', 2);
-        CustomerReviewMgt.SubmitReview(ReviewA);
+        BCJTestLibrary.SendDraftReview(ReviewA);
+        BCJTestLibrary.SendDraftReview(ReviewB);
+        BCJTestLibrary.SetApprovedHours(ReviewA."Review No.", 'T1', 2);
+        BCJTestLibrary.SubmitAnswer(ReviewA);
         // [WHEN] The open reviews are requested for the whole customer
         FilterOwnProjects(TimeEntry);
         // [THEN] Only the unanswered review
@@ -1880,7 +2212,7 @@ codeunit 50154 "BCJ Customer Review Tests"
         // [SCENARIO] The consultant asks about the worklogs they selected, not about every open
         // review. Another project's review would end up in a reminder to the wrong contact -
         // possibly exposing another project's hours to someone who should not see them.
-        // [GIVEN] Two projects, each with a Sent review
+        // [GIVEN] Two projects, each with an open review
         Initialize();
         CustomerNo := CreateCustomer('C');
         JobA := CreateProject('P1', CustomerNo);
@@ -1898,7 +2230,7 @@ codeunit 50154 "BCJ Customer Review Tests"
         // [THEN] Only P1's review
         Assert.AreEqual(1, CustomerReviewMgt.GetOpenReviews(TimeEntry, TempOpenReview), 'Only reviews of entries inside the caller filter may count as open');
         Assert.AreEqual(1, TempOpenReview.Count(), 'Only reviews of entries inside the caller filter may be in the result');
-        AssertHoldsReview(TempOpenReview, ReviewA, 'The Sent review of the filtered project P1 must be in the result');
+        AssertHoldsReview(TempOpenReview, ReviewA, 'The open review of the filtered project P1 must be in the result');
     end;
 
     [Test]
@@ -1912,7 +2244,7 @@ codeunit 50154 "BCJ Customer Review Tests"
         // [SCENARIO] The lookup is offered on the overview whether or not reviews are in use, and
         // a company that never configured the review web app has no base URL. Asking about hours
         // that have no open review must then answer "none", not fail on setup the answer does not
-        // need - an error there would make the action look broken to everyone not using reviews.
+        // need.
         // [GIVEN] Entries without a review, and entries whose review was cancelled
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
@@ -1925,8 +2257,8 @@ codeunit 50154 "BCJ Customer Review Tests"
         BCJTestLibrary.EnsureSetup('');
         // [WHEN] / [THEN] No open review and no error
         FilterOwnProjects(TimeEntry);
-        Assert.AreEqual(0, CustomerReviewMgt.GetOpenReviews(TimeEntry, TempOpenReview), 'With no Sent review in the filter the result must be 0, and a blank review base URL must not cause an error');
-        Assert.IsTrue(TempOpenReview.IsEmpty(), 'With no Sent review in the filter the result must be empty');
+        Assert.AreEqual(0, CustomerReviewMgt.GetOpenReviews(TimeEntry, TempOpenReview), 'With no open review in the filter the result must be 0, and a blank review base URL must not cause an error');
+        Assert.IsTrue(TempOpenReview.IsEmpty(), 'With no open review in the filter the result must be empty');
     end;
 
     [Test]
@@ -1938,21 +2270,20 @@ codeunit 50154 "BCJ Customer Review Tests"
         JobNo: Code[20];
     begin
         // [SCENARIO] Finding which reviews are open is a question about data, not about the web
-        // app. The base URL only matters when a link is built, which is no longer this
-        // procedure's job - so clearing it (setup changed, web app moved) must not hide or break
-        // the list of reviews the customer still owes an answer on.
-        // [GIVEN] A Sent review, after which the review base URL is cleared
+        // app. Clearing the base URL (setup changed, web app moved) must not hide or break the list
+        // of reviews the customer still owes an answer on.
+        // [GIVEN] A sent review, after which the review base URL is cleared
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
-        CreateOneReview(Review);
+        CreateSentReview(Review);
         BCJTestLibrary.EnsureSetup('');
         // [WHEN] The open reviews are requested
         FilterOwnProjects(TimeEntry);
-        // [THEN] The Sent review is returned without error
-        Assert.AreEqual(1, CustomerReviewMgt.GetOpenReviews(TimeEntry, TempOpenReview), 'A Sent review must still count as open when the review base URL is blank');
-        AssertHoldsReview(TempOpenReview, Review, 'A Sent review must still be in the result when the review base URL is blank');
+        // [THEN] The sent review is returned without error
+        Assert.AreEqual(1, CustomerReviewMgt.GetOpenReviews(TimeEntry, TempOpenReview), 'A sent review must still count as open when the review base URL is blank');
+        AssertHoldsReview(TempOpenReview, Review, 'A sent review must still be in the result when the review base URL is blank');
     end;
 
     [Test]
@@ -1963,12 +2294,11 @@ codeunit 50154 "BCJ Customer Review Tests"
         Review: Record "BCJ Customer Review";
         JobNo: Code[20];
     begin
-        // [SCENARIO] Callers reuse one temporary buffer across selections (the page asks again
-        // each time the consultant changes the selection). A row left over from an earlier call
-        // would put a review into the reminder that is not in the current selection - the same
-        // wrong-contact exposure the caller filter guards against - so the buffer must be
+        // [SCENARIO] Callers reuse one temporary buffer across selections. A row left over from an
+        // earlier call would put a review into the reminder that is not in the current selection -
+        // the same wrong-contact exposure the caller filter guards against - so the buffer must be
         // emptied before it is filled.
-        // [GIVEN] A Sent review, and a result buffer already holding an unrelated review 999999
+        // [GIVEN] An open review, and a result buffer already holding an unrelated review 999999
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
@@ -1980,12 +2310,12 @@ codeunit 50154 "BCJ Customer Review Tests"
         TempOpenReview.Insert(false);
         // [WHEN] The open reviews are requested
         FilterOwnProjects(TimeEntry);
-        // [THEN] Only the real Sent review remains
+        // [THEN] Only the real open review remains
         Assert.AreEqual(1, CustomerReviewMgt.GetOpenReviews(TimeEntry, TempOpenReview), 'The count must cover only the reviews found in this call');
         TempOpenReview.Reset();
         Assert.IsFalse(TempOpenReview.Get(999999), 'A row that was in the buffer before the call must be gone afterwards');
         Assert.AreEqual(1, TempOpenReview.Count(), 'After the call the buffer must hold only the reviews found in this call');
-        AssertHoldsReview(TempOpenReview, Review, 'The Sent review must be in the result');
+        AssertHoldsReview(TempOpenReview, Review, 'The open review must be in the result');
     end;
 
     local procedure AssertHoldsReview(var TempOpenReview: Record "BCJ Customer Review" temporary; Review: Record "BCJ Customer Review"; Msg: Text)
@@ -1995,7 +2325,7 @@ codeunit 50154 "BCJ Customer Review Tests"
     end;
 
     // ---------------------------------------------------------------------------------
-    // Hours to Bill - what the consultant asks the customer to approve
+    // Hours to Bill - what the consultant asks the customer to approve (Draft only)
     // ---------------------------------------------------------------------------------
 
     [Test]
@@ -2006,11 +2336,11 @@ codeunit 50154 "BCJ Customer Review Tests"
         JobNo: Code[20];
     begin
         // [SCENARIO] Until the consultant decides otherwise, the customer is asked to approve
-        // everything that was sent - asking for less by default would silently give hours away,
+        // everything reserved - asking for less by default would silently give hours away,
         // asking for more would invent them. The default must be the line's Logged Hours after
-        // its 0.01 rounding, not the raw sum of the entries: the customer sees two decimals, and
-        // Approved Hours is capped by Hours to Bill, so a raw 0.3333 cap would let the customer
-        // approve more than the 0.33 they were shown.
+        // its 0.01 rounding, not the raw sum: the customer sees two decimals, and Approved Hours
+        // is capped by Hours to Bill, so a raw 0.3333 cap would let the customer approve more
+        // than the 0.33 they were shown.
         // [GIVEN] Two tasks, one of which holds a third of an hour
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
@@ -2019,11 +2349,11 @@ codeunit 50154 "BCJ Customer Review Tests"
         AddEntry('E1', JobNo, 'T1', D(), 2, "BCJ Billing Status"::Open);
         AddEntry('E2', JobNo, 'T1', D() + 1, 1.5, "BCJ Billing Status"::Open);
         AddEntry('E3', JobNo, 'T2', D(), 1 / 3, "BCJ Billing Status"::Open);
-        // [WHEN] The project is sent for review
+        // [WHEN] The project is put in review
         CreateOneReview(Review);
         // [THEN] Every line asks for exactly its logged hours
         ReviewLine.Get(Review."Review No.", 'T1');
-        Assert.AreEqual(3.5, ReviewLine."Hours to Bill", 'A new line must ask the customer to approve all of its logged hours');
+        Assert.AreEqual(3.5, ReviewLine."Hours to Bill", 'A new line must ask the customer to approve all of its reserved hours');
         Assert.AreEqual(ReviewLine."Logged Hours", ReviewLine."Hours to Bill", 'A new line must ask for exactly its Logged Hours');
         ReviewLine.Get(Review."Review No.", 'T2');
         Assert.AreEqual(0.33, ReviewLine."Logged Hours", 'Fixture: Logged Hours must be rounded to 0.01');
@@ -2044,17 +2374,13 @@ codeunit 50154 "BCJ Customer Review Tests"
         JobNo: Code[20];
         OtherJobNo: Code[20];
     begin
-        // [SCENARIO] The customer judges a task by its whole history, not by this period's slice:
-        // what has been logged on it altogether, what was already charged, what was written off,
-        // and what is still undecided. So the snapshot covers every entry of the task whatever
-        // the consultant's selection was. Billed and Billable entries count only their allocated
-        // Billable Hours as billed; the rest of their time was worked and not charged, so it is
-        // Not Billable. Not Billed is what nobody has decided yet (Open + Sent for Review,
-        // including this review). Entries of another task or project are another agreement and
-        // must never leak into the numbers.
-        // [GIVEN] Task T1 with a partly billed entry (4 h, 3 billed), a billable entry (2 h),
-        // a not billable entry (1.5 h), an open entry outside the period (0.75 h) and two open
-        // entries in the period (2.5 + 1.25 h)
+        // [SCENARIO] The customer judges a task by its whole history, not by this period's slice.
+        // Contract task snapshot (over all worklogs of the task): Billed = Billed + Billable
+        // (charged or agreed to be charged), Not Billable = Not Billable, Not Billed = Open +
+        // In Review (nobody has decided yet, including this review), Logged = sum of logged hours.
+        // Another task or project is another agreement and must never leak into the numbers.
+        // [GIVEN] Task T1: billed 4 h, billable 2 h, written off 1.5 h, open 0.75 h outside the
+        // period, and 2.5 + 1.25 h open in the period
         Initialize();
         CustomerNo := CreateCustomer('C');
         JobNo := CreateProject('P1', CustomerNo);
@@ -2063,7 +2389,6 @@ codeunit 50154 "BCJ Customer Review Tests"
         CreateTask(JobNo, 'T2');
         CreateTask(OtherJobNo, 'T1');
         AddEntry('BILLED', JobNo, 'T1', D() - 30, 4, "BCJ Billing Status"::Billed);
-        SetBillableHours('BILLED', 3);
         AddEntry('BILLABLE', JobNo, 'T1', D() - 20, 2, "BCJ Billing Status"::Billable);
         AddEntry('NOTBILL', JobNo, 'T1', D() - 10, 1.5, "BCJ Billing Status"::"Not Billable");
         AddEntry('LATER', JobNo, 'T1', D() + 40, 0.75, "BCJ Billing Status"::Open);
@@ -2072,7 +2397,7 @@ codeunit 50154 "BCJ Customer Review Tests"
         // [GIVEN] Decided hours on another task of the same project and on the same task no. of another project
         AddEntry('OTHERTASK', JobNo, 'T2', D() - 5, 7, "BCJ Billing Status"::Billed);
         AddEntry('OTHERPROJ', OtherJobNo, 'T1', D() - 5, 9, "BCJ Billing Status"::Billable);
-        // [WHEN] Only project P1 in the current period is sent
+        // [WHEN] Only project P1 in the current period is put in review
         FilterOwnProjects(TimeEntry);
         TimeEntry.SetRange("Project No.", JobNo);
         TimeEntry.SetRange("Posting Date", D(), D() + 1);
@@ -2081,47 +2406,12 @@ codeunit 50154 "BCJ Customer Review Tests"
         Review.Get(TempReview."Review No.");
         // [THEN] The line holds only this period's hours, but the snapshot holds the whole task
         ReviewLine.SetRange("Review No.", Review."Review No.");
-        Assert.AreEqual(1, ReviewLine.Count(), 'Fixture: only task T1 had open entries in the period, so only T1 may get a line');
+        Assert.AreEqual(1, ReviewLine.Count(), 'Fixture: only task T1 had open hours in the period, so only T1 may get a line');
         ReviewLine.Get(Review."Review No.", 'T1');
         Assert.AreEqual(3.75, ReviewLine."Logged Hours", 'Fixture: the line must hold only the two entries inside the period');
-        Assert.AreEqual(3.75, ReviewLine."Hours to Bill", 'Hours to Bill must default to the hours sent, not to the task history');
-        AssertTaskSnapshot(ReviewLine, 12, 5, 2.5, 4.5, 'Task T1 with billed, billable, not billable, later open and reviewed entries');
-    end;
-
-    [Test]
-    procedure CreateReviews_TaskSnapshotClampsAllocationAndBalances()
-    var
-        Review: Record "BCJ Customer Review";
-        ReviewLine: Record "BCJ Customer Review Line";
-        JobNo: Code[20];
-    begin
-        // [SCENARIO] Billable Hours is a stored number and can be out of step with the logged time
-        // (a worklog corrected in Jira, an allocation typed by hand). The snapshot must never show
-        // more billed than was worked, nor a negative charge - so the allocation counts only within
-        // 0..logged time. And because the customer sees four numbers that are meant to explain
-        // each other, each is rounded to 0.01 before Not Billed is derived, so Logged is always
-        // exactly Billed + Not Billable + Not Billed on screen.
-        // [GIVEN] A Billable entry of 2 h allocated 3 h, a Billed entry of 1 h allocated -0.5 h,
-        // a Billable entry of 1/3 h allocated 1/6 h, and an Open entry of 1/3 h that is reviewed
-        Initialize();
-        JobNo := CreateProject('P1', CreateCustomer('C'));
-        CreateTask(JobNo, 'T1');
-        AddEntry('OVER', JobNo, 'T1', D() - 3, 2, "BCJ Billing Status"::Billable);
-        SetBillableHours('OVER', 3);
-        AddEntry('NEG', JobNo, 'T1', D() - 2, 1, "BCJ Billing Status"::Billed);
-        SetBillableHours('NEG', -0.5);
-        AddEntry('THIRD', JobNo, 'T1', D() - 1, 1 / 3, "BCJ Billing Status"::Billable);
-        SetBillableHours('THIRD', 1 / 6);
-        AddEntry('OPEN', JobNo, 'T1', D(), 1 / 3, "BCJ Billing Status"::Open);
-        // [WHEN] The task is sent for review
-        CreateOneReview(Review);
-        // [THEN] Logged 3.67 = Billed 2.17 (2 + 1/6) + Not Billable 1.17 (1 + 1/6) + Not Billed 0.33
-        ReviewLine.Get(Review."Review No.", 'T1');
-        AssertTaskSnapshot(ReviewLine, 3.67, 2.17, 1.17, 0.33, 'Task T1 with over-, under- and fractionally allocated entries');
-        Assert.AreEqual(
-          ReviewLine."Task Logged Hours",
-          ReviewLine."Task Billed Hours" + ReviewLine."Task Not Billable Hours" + ReviewLine."Task Not Billed Hours",
-          'The four task figures must balance exactly: Logged = Billed + Not Billable + Not Billed');
+        Assert.AreEqual(3.75, ReviewLine."Hours to Bill", 'Hours to Bill must default to the hours reserved, not to the task history');
+        // Logged 12 = Billed 4 + Billable 2 (6) + Not Billable 1.5 + Open 0.75 + In Review 3.75 (4.5)
+        AssertTaskSnapshot(ReviewLine, 12, 6, 1.5, 4.5, 'Task T1 with billed, billable, written-off, later open and reserved hours');
     end;
 
     [Test]
@@ -2131,24 +2421,24 @@ codeunit 50154 "BCJ Customer Review Tests"
         ReviewLine: Record "BCJ Customer Review Line";
         JobNo: Code[20];
     begin
-        // [SCENARIO] The consultant may ask the customer to approve less than was logged - never
+        // [SCENARIO] The consultant may ask the customer to approve less than was reserved - never
         // more, because that would bill hours nobody worked, and never less than nothing. Anything
-        // between 0 and the logged hours is a legitimate commercial decision and must be accepted.
-        // [GIVEN] A review line with 3 logged hours
+        // between 0 and the reserved hours is a legitimate commercial decision and is accepted.
+        // [GIVEN] A draft review line with 3 reserved hours
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('E1', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
         CreateOneReview(Review);
         ReviewLine.Get(Review."Review No.", 'T1');
-        // [WHEN] More hours than logged are asked for
+        // [WHEN] More hours than reserved are asked for
         // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
         Commit();
         asserterror ReviewLine.Validate("Hours to Bill", 3.01);
         // [THEN] Refused and the stored value is unchanged
         Assert.ExpectedErrorCode('Dialog');
         ReviewLine.Get(Review."Review No.", 'T1');
-        Assert.AreEqual(3.0, ReviewLine."Hours to Bill", 'Asking for more hours than were logged must leave Hours to Bill unchanged');
+        Assert.AreEqual(3.0, ReviewLine."Hours to Bill", 'Asking for more hours than were reserved must leave Hours to Bill unchanged');
         // [WHEN] A negative number of hours is asked for
         // (The field minimum may catch this before the range check does, so only the state is asserted.)
         asserterror ReviewLine.Validate("Hours to Bill", -1);
@@ -2156,47 +2446,75 @@ codeunit 50154 "BCJ Customer Review Tests"
         ReviewLine.Get(Review."Review No.", 'T1');
         Assert.AreEqual(3.0, ReviewLine."Hours to Bill", 'Asking for a negative number of hours must leave Hours to Bill unchanged');
         // [WHEN] Values inside the range are asked for, including both bounds
-        SetHoursToBill(Review."Review No.", 'T1', 0);
+        BCJTestLibrary.SetHoursToBill(Review."Review No.", 'T1', 0);
         ReviewLine.Get(Review."Review No.", 'T1');
         Assert.AreEqual(0.0, ReviewLine."Hours to Bill", 'Zero hours to bill must be accepted - the consultant may ask for nothing');
-        SetHoursToBill(Review."Review No.", 'T1', 3);
+        BCJTestLibrary.SetHoursToBill(Review."Review No.", 'T1', 3);
         ReviewLine.Get(Review."Review No.", 'T1');
-        Assert.AreEqual(3.0, ReviewLine."Hours to Bill", 'Hours to bill equal to the logged hours must be accepted');
-        SetHoursToBill(Review."Review No.", 'T1', 1.5);
+        Assert.AreEqual(3.0, ReviewLine."Hours to Bill", 'Hours to bill equal to the reserved hours must be accepted');
+        BCJTestLibrary.SetHoursToBill(Review."Review No.", 'T1', 1.5);
         ReviewLine.Get(Review."Review No.", 'T1');
-        Assert.AreEqual(1.5, ReviewLine."Hours to Bill", 'Hours to bill between 0 and the logged hours must be accepted and stored');
+        Assert.AreEqual(1.5, ReviewLine."Hours to Bill", 'Hours to bill between 0 and the reserved hours must be accepted and stored');
     end;
 
     [Test]
-    procedure ReviewLine_LoweringHoursToBillLowersApprovedHours()
+    procedure ReviewLine_HoursToBillCanOnlyChangeInDraft()
     var
         Review: Record "BCJ Customer Review";
         ReviewLine: Record "BCJ Customer Review Line";
         JobNo: Code[20];
     begin
-        // [SCENARIO] The customer can never have approved more than they were asked for. When the
-        // consultant lowers the request below an approval already on the line, the approval must
-        // follow it down - otherwise the line would carry an approval the review no longer allows
-        // and the submit would be refused for a state the consultant created. An approval that
-        // still fits under the new request is the customer's own answer and must be left alone.
-        // [GIVEN] A line of 4 logged hours with 3 hours approved
+        // [SCENARIO] Business flow step 4: "A sent review is frozen: no Hours to Bill changes".
+        // The customer has been shown what they are asked to approve; changing the question under
+        // them would make their answer refer to figures they never saw, and the hours cut on Send
+        // are already back in Open.
+        // [GIVEN] A review over 4 h, sent asking for 3
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('E1', JobNo, 'T1', D(), 4, "BCJ Billing Status"::Open);
         CreateOneReview(Review);
-        SetApproved(Review."Review No.", 'T1', 3);
-        // [WHEN] Hours to Bill is lowered to 3.5, still above the approval
-        SetHoursToBill(Review."Review No.", 'T1', 3.5);
-        // [THEN] The approval is unchanged
+        BCJTestLibrary.SetHoursToBill(Review."Review No.", 'T1', 3);
+        BCJTestLibrary.SendDraftReview(Review);
+        // [WHEN] Hours to Bill is changed on the sent review
+        // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
+        Commit();
+        asserterror BCJTestLibrary.SetHoursToBill(Review."Review No.", 'T1', 2);
+        // [THEN] Refused; the line and the hours are unchanged
         ReviewLine.Get(Review."Review No.", 'T1');
-        Assert.AreEqual(3.0, ReviewLine."Approved Hours", 'An approval that still fits under the new Hours to Bill must not be changed');
-        // [WHEN] Hours to Bill is lowered to 2, below the approval
-        SetHoursToBill(Review."Review No.", 'T1', 2);
-        // [THEN] The approval is lowered to the new Hours to Bill
+        Assert.AreEqual(3.0, ReviewLine."Hours to Bill", 'Hours to Bill of a sent review must not change');
+        AssertBuckets('E1', 1, 3, 0, 0, 0, 'A refused change must not move any hour');
+    end;
+
+    [Test]
+    procedure ReviewLine_ApprovedHoursCanOnlyChangeWhenSent()
+    var
+        Review: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] Contract, table 50104: "Approved Hours only while Sent". On a draft nobody
+        // has been asked anything yet - an approval there would be an answer to a question the
+        // consultant is still writing.
+        // [GIVEN] A draft review
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
+        CreateOneReview(Review);
+        // [WHEN] An approval is entered on the draft
+        // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
+        Commit();
+        asserterror BCJTestLibrary.SetApprovedHours(Review."Review No.", 'T1', 2);
+        // [THEN] Refused
         ReviewLine.Get(Review."Review No.", 'T1');
-        Assert.AreEqual(2.0, ReviewLine."Hours to Bill", 'The lowered Hours to Bill must be stored');
-        Assert.AreEqual(2.0, ReviewLine."Approved Hours", 'An approval above the new Hours to Bill must be lowered to exactly the new Hours to Bill');
+        Assert.AreEqual(0.0, ReviewLine."Approved Hours", 'An approval must not be stored on a draft review');
+        // [WHEN] The review is sent and the approval entered
+        BCJTestLibrary.SendDraftReview(Review);
+        BCJTestLibrary.SetApprovedHours(Review."Review No.", 'T1', 2);
+        // [THEN] Accepted
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(2.0, ReviewLine."Approved Hours", 'An approval on a sent review must be stored');
     end;
 
     [Test]
@@ -2208,15 +2526,15 @@ codeunit 50154 "BCJ Customer Review Tests"
     begin
         // [SCENARIO] Once the consultant has asked for fewer hours than were logged, the request -
         // not the logged time - is the ceiling of the approval. A customer who could approve up to
-        // the logged hours would be approving hours the consultant chose not to charge, and the
-        // invoice would exceed what the firm offered.
-        // [GIVEN] A line of 3 logged hours of which 2 are asked for
+        // the logged hours would be approving hours the consultant chose not to charge.
+        // [GIVEN] A line of 3 logged hours sent asking for 2
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('E1', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
         CreateOneReview(Review);
-        SetHoursToBill(Review."Review No.", 'T1', 2);
+        BCJTestLibrary.SetHoursToBill(Review."Review No.", 'T1', 2);
+        BCJTestLibrary.SendDraftReview(Review);
         ReviewLine.Get(Review."Review No.", 'T1');
         // [WHEN] 2.5 hours are approved - within the logged hours but above the request
         // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
@@ -2227,7 +2545,7 @@ codeunit 50154 "BCJ Customer Review Tests"
         ReviewLine.Get(Review."Review No.", 'T1');
         Assert.AreEqual(0.0, ReviewLine."Approved Hours", 'Approving more than Hours to Bill must be refused even when it is within the logged hours');
         // [WHEN] Exactly the requested hours are approved
-        SetApproved(Review."Review No.", 'T1', 2);
+        BCJTestLibrary.SetApprovedHours(Review."Review No.", 'T1', 2);
         // [THEN] Accepted
         ReviewLine.Get(Review."Review No.", 'T1');
         Assert.AreEqual(2.0, ReviewLine."Approved Hours", 'Approving exactly the Hours to Bill must be accepted');
@@ -2241,17 +2559,18 @@ codeunit 50154 "BCJ Customer Review Tests"
         JobNo: Code[20];
     begin
         // [SCENARIO] Field validation can be bypassed - an API or a direct write stores the value
-        // without it. The submit is the last door before hours become invoiceable, so it checks
-        // the approval against what was asked for once more. Letting it through would bill hours
-        // the consultant chose not to charge; the review must stay out with the customer instead.
-        // [GIVEN] A line of 3 logged hours with 2 asked for, and 2.5 approved written directly
+        // without it. The submit is the last door before hours become Billable, so it checks the
+        // approval against what was asked for once more (0 <= Approved <= Hours to Bill). Letting
+        // it through would bill hours the consultant chose not to charge.
+        // [GIVEN] E1 1 h and E2 2 h sent asking for 2 (E2 keeps 1 in review), 2.5 approved written directly
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('E1', JobNo, 'T1', D(), 1, "BCJ Billing Status"::Open);
         AddEntry('E2', JobNo, 'T1', D() + 1, 2, "BCJ Billing Status"::Open);
         CreateOneReview(Review);
-        SetHoursToBill(Review."Review No.", 'T1', 2);
+        BCJTestLibrary.SetHoursToBill(Review."Review No.", 'T1', 2);
+        BCJTestLibrary.SendDraftReview(Review);
         ReviewLine.Get(Review."Review No.", 'T1');
         ReviewLine."Approved Hours" := 2.5;
         ReviewLine.Modify(false);
@@ -2259,12 +2578,12 @@ codeunit 50154 "BCJ Customer Review Tests"
         // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
         Commit();
         asserterror CustomerReviewMgt.SubmitReview(Review);
-        // [THEN] Refused; the review is still out and no entry was decided
+        // [THEN] Refused; the review is still out and no hour was decided
         Review.Get(Review."Review No.");
         Assert.AreEqual("BCJ Review Status"::Sent, Review.Status, 'A review with an approval above Hours to Bill must not be answered');
         Assert.AreEqual(0DT, Review."Answered On", 'A refused submit must not stamp an answer time');
-        AssertEntry('E1', "BCJ Billing Status"::"Sent for Review", 1, Review."Review No.", 'A refused submit must leave the entries in review with their full hours');
-        AssertEntry('E2', "BCJ Billing Status"::"Sent for Review", 2, Review."Review No.", 'A refused submit must leave the entries in review with their full hours');
+        AssertBuckets('E1', 0, 1, 0, 0, 0, 'A refused submit must leave the hours in review');
+        AssertBuckets('E2', 1, 1, 0, 0, 0, 'A refused submit must leave the hours in review');
         ReviewLine.Get(Review."Review No.", 'T1');
         Assert.AreEqual(0.0, ReviewLine."Applied Hours", 'A refused submit must apply nothing');
     end;
@@ -2277,10 +2596,10 @@ codeunit 50154 "BCJ Customer Review Tests"
         JobNo: Code[20];
     begin
         // [SCENARIO] The business case the feature exists for: the consultant logged 10 hours but
-        // will only charge half. They set 50% before sending, the customer sees and approves 5,
-        // and the 5 hours land on the worklogs oldest first exactly as a direct approval would -
-        // the older 6-hour entry carries all 5, the newer one is written off, never left Open.
-        // [GIVEN] A task with 6 h (older) and 4 h (newer) sent for review
+        // will only charge half. They set 50% on the draft, send it (the cut 5 hours return to
+        // Open, off the newest worklog first), the customer approves 5, and the 5 hours land on
+        // the oldest worklog - which ends up 5 Billable + 1 Open, the newer worklog 4 Open.
+        // [GIVEN] A draft over 6 h (older) and 4 h (newer)
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
@@ -2291,25 +2610,26 @@ codeunit 50154 "BCJ Customer Review Tests"
         CustomerReviewMgt.SetHoursToBillPct(Review, 50);
         // [THEN] The line asks for 5 hours
         ReviewLine.Get(Review."Review No.", 'T1');
-        Assert.AreEqual(10.0, ReviewLine."Logged Hours", 'Setting a percentage must not change the logged hours');
-        Assert.AreEqual(5.0, ReviewLine."Hours to Bill", '50% of 10 logged hours must ask the customer for 5 hours');
+        Assert.AreEqual(10.0, ReviewLine."Logged Hours", 'Setting a percentage must not change the reserved hours');
+        Assert.AreEqual(5.0, ReviewLine."Hours to Bill", '50% of 10 reserved hours must ask the customer for 5 hours');
         Review.Get(Review."Review No.");
         Review.CalcFields("Hours to Bill");
         Assert.AreEqual(5.0, Review."Hours to Bill", 'The review must total the hours asked for');
-        // [WHEN] The customer approves the 5 hours and submits
-        SetApproved(Review."Review No.", 'T1', 5);
-        CustomerReviewMgt.SubmitReview(Review);
-        // [THEN] The older entry is billable for 5, the newer is not billable
-        Review.Get(Review."Review No.");
+        // [WHEN] It is sent, the customer approves the 5 hours and submits
+        BCJTestLibrary.SendDraftReview(Review);
+        BCJTestLibrary.SetApprovedHours(Review."Review No.", 'T1', 5);
+        BCJTestLibrary.SubmitAnswer(Review);
+        // [THEN] The older worklog is billable for 5, the rest is Open
         Assert.AreEqual("BCJ Review Status"::Answered, Review.Status, 'A review approved within its Hours to Bill must be answered');
-        AssertEntry('OLD', "BCJ Billing Status"::Billable, 5, Review."Review No.", 'The oldest entry must carry the approved hours first');
-        AssertEntry('NEW', "BCJ Billing Status"::"Not Billable", 0, Review."Review No.", 'The entry left with no approved hours must be Not Billable');
+        AssertBuckets('OLD', 1, 0, 5, 0, 0, 'The oldest worklog must carry the approved hours first');
+        AssertBuckets('NEW', 4, 0, 0, 0, 0, 'The worklog left with no approved hours must be Open, not written off');
         ReviewLine.Get(Review."Review No.", 'T1');
         Assert.AreEqual(5.0, ReviewLine."Applied Hours", 'All 5 approved hours must be applied');
+        AssertOwnInvariant('After a 50% review');
     end;
 
     [Test]
-    procedure SetHoursToBillPct_RoundsAndLowersApprovedHours()
+    procedure SetHoursToBillPct_RoundsAndTouchesOnlyItsOwnReview()
     var
         TimeEntry: Record "BCJ Project Time Entry";
         TempReview: Record "BCJ Customer Review" temporary;
@@ -2322,11 +2642,9 @@ codeunit 50154 "BCJ Customer Review Tests"
     begin
         // [SCENARIO] The customer is shown two decimals, so the percentage result is rounded to
         // 0.01 the ordinary way (0.625 -> 0.63): truncating would shave a fraction off every task
-        // in the firm's disfavour. An approval above the new request is lowered to it, one below
-        // is the customer's answer and stays. The percentage applies to the one review it was
-        // called for - another project's review has its own agreement.
-        // [GIVEN] Review of P1: T1 logged 1.25 h with 0.5 approved, T2 logged 4 h with 4 approved;
-        // and a separate review of P2 with 2 h logged
+        // in the firm's disfavour. The percentage applies to the one review it was called for -
+        // another project's review has its own agreement.
+        // [GIVEN] Draft of P1: T1 1.25 h, T2 4 h; and a separate draft of P2 with 2 h
         Initialize();
         CustomerNo := CreateCustomer('C');
         JobNo := CreateProject('P1', CustomerNo);
@@ -2341,19 +2659,13 @@ codeunit 50154 "BCJ Customer Review Tests"
         CustomerReviewMgt.CreateReviews(TimeEntry, TempReview);
         GetReviewOfProject(JobNo, Review);
         GetReviewOfProject(OtherJobNo, OtherReview);
-        SetApproved(Review."Review No.", 'T1', 0.5);
-        SetApproved(Review."Review No.", 'T2', 4);
         // [WHEN] 50% is set on the P1 review
         CustomerReviewMgt.SetHoursToBillPct(Review, 50);
-        // [THEN] T1 asks for 0.63 and keeps its approval of 0.5
+        // [THEN] T1 asks for 0.63, T2 for 2, the other review is untouched
         ReviewLine.Get(Review."Review No.", 'T1');
         Assert.AreEqual(0.63, ReviewLine."Hours to Bill", '50% of 1.25 hours must be rounded to 0.63, the standard way');
-        Assert.AreEqual(0.5, ReviewLine."Approved Hours", 'An approval below the new Hours to Bill must be left as the customer gave it');
-        // [THEN] T2 asks for 2 and its approval is lowered to 2
         ReviewLine.Get(Review."Review No.", 'T2');
         Assert.AreEqual(2.0, ReviewLine."Hours to Bill", '50% of 4 hours must ask for 2 hours');
-        Assert.AreEqual(2.0, ReviewLine."Approved Hours", 'An approval above the new Hours to Bill must be lowered to it');
-        // [THEN] The other review is untouched
         ReviewLine.Get(OtherReview."Review No.", 'T1');
         Assert.AreEqual(2.0, ReviewLine."Hours to Bill", 'Setting a percentage on one review must not change the lines of another review');
     end;
@@ -2366,27 +2678,26 @@ codeunit 50154 "BCJ Customer Review Tests"
         JobNo: Code[20];
     begin
         // [SCENARIO] 0% (a goodwill task, charge nothing) and 100% (undo an earlier cut) are both
-        // everyday choices, so both bounds are inside the allowed range. 100% must restore the
-        // request to exactly the logged hours; 0% must also pull any approval down to nothing.
-        // [GIVEN] A line of 3 logged hours with 3 approved
+        // everyday choices on a draft. Nothing is released while it is a draft, so 100% after 0%
+        // must restore the request to exactly the reserved hours.
+        // [GIVEN] A draft line of 3 reserved hours
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('E1', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
         CreateOneReview(Review);
-        SetApproved(Review."Review No.", 'T1', 3);
         // [WHEN] 0% is set
         CustomerReviewMgt.SetHoursToBillPct(Review, 0);
-        // [THEN] Nothing is asked for and nothing stays approved
+        // [THEN] Nothing is asked for
         ReviewLine.Get(Review."Review No.", 'T1');
         Assert.AreEqual(0.0, ReviewLine."Hours to Bill", '0% must ask the customer for no hours');
-        Assert.AreEqual(0.0, ReviewLine."Approved Hours", '0% must lower any approval to zero');
         // [WHEN] 100% is set
         Review.Get(Review."Review No.");
         CustomerReviewMgt.SetHoursToBillPct(Review, 100);
-        // [THEN] The full logged hours are asked for again
+        // [THEN] The full reserved hours are asked for again
         ReviewLine.Get(Review."Review No.", 'T1');
-        Assert.AreEqual(3.0, ReviewLine."Hours to Bill", '100% must ask for exactly the logged hours');
+        Assert.AreEqual(3.0, ReviewLine."Hours to Bill", '100% must ask for exactly the reserved hours');
+        AssertBuckets('E1', 0, 3, 0, 0, 0, 'Changing the percentage on a draft must not move any hour');
     end;
 
     [Test]
@@ -2399,7 +2710,7 @@ codeunit 50154 "BCJ Customer Review Tests"
         // [SCENARIO] More than 100% would bill hours nobody worked; a negative percentage is
         // meaningless. Either is a typo and must be refused before any line is touched - a
         // half-applied percentage would leave the review asking for a mix of old and new figures.
-        // [GIVEN] A review over two tasks, one with an approval
+        // [GIVEN] A draft over two tasks, one of them already lowered
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
@@ -2407,15 +2718,15 @@ codeunit 50154 "BCJ Customer Review Tests"
         AddEntry('E1', JobNo, 'T1', D(), 3, "BCJ Billing Status"::Open);
         AddEntry('E2', JobNo, 'T2', D(), 2, "BCJ Billing Status"::Open);
         CreateOneReview(Review);
-        SetApproved(Review."Review No.", 'T1', 3);
+        BCJTestLibrary.SetHoursToBill(Review."Review No.", 'T1', 2.5);
         // [WHEN] 150% is set
         // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
         Commit();
+        Review.Get(Review."Review No.");
         asserterror CustomerReviewMgt.SetHoursToBillPct(Review, 150);
         // [THEN] Refused and no line changed
         ReviewLine.Get(Review."Review No.", 'T1');
-        Assert.AreEqual(3.0, ReviewLine."Hours to Bill", 'A refused percentage above 100 must leave Hours to Bill unchanged');
-        Assert.AreEqual(3.0, ReviewLine."Approved Hours", 'A refused percentage above 100 must leave the approval unchanged');
+        Assert.AreEqual(2.5, ReviewLine."Hours to Bill", 'A refused percentage above 100 must leave Hours to Bill unchanged');
         ReviewLine.Get(Review."Review No.", 'T2');
         Assert.AreEqual(2.0, ReviewLine."Hours to Bill", 'A refused percentage above 100 must leave every line unchanged');
         // [WHEN] -1% is set
@@ -2423,10 +2734,34 @@ codeunit 50154 "BCJ Customer Review Tests"
         asserterror CustomerReviewMgt.SetHoursToBillPct(Review, -1);
         // [THEN] Refused and no line changed
         ReviewLine.Get(Review."Review No.", 'T1');
-        Assert.AreEqual(3.0, ReviewLine."Hours to Bill", 'A refused negative percentage must leave Hours to Bill unchanged');
-        Assert.AreEqual(3.0, ReviewLine."Approved Hours", 'A refused negative percentage must leave the approval unchanged');
+        Assert.AreEqual(2.5, ReviewLine."Hours to Bill", 'A refused negative percentage must leave Hours to Bill unchanged');
         ReviewLine.Get(Review."Review No.", 'T2');
         Assert.AreEqual(2.0, ReviewLine."Hours to Bill", 'A refused negative percentage must leave every line unchanged');
+    end;
+
+    [Test]
+    procedure SetHoursToBillPct_OnSentReviewIsRejected()
+    var
+        Review: Record "BCJ Customer Review";
+        ReviewLine: Record "BCJ Customer Review Line";
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] Contract: "SetHoursToBillPct: Draft only". A sent review is frozen - the
+        // customer is looking at its figures, and the hours cut on Send are already Open.
+        // [GIVEN] A review over 4 h sent asking for all 4
+        Initialize();
+        JobNo := CreateProject('P1', CreateCustomer('C'));
+        CreateTask(JobNo, 'T1');
+        AddEntry('E1', JobNo, 'T1', D(), 4, "BCJ Billing Status"::Open);
+        CreateSentReview(Review);
+        // [WHEN] A percentage is set
+        // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
+        Commit();
+        asserterror CustomerReviewMgt.SetHoursToBillPct(Review, 50);
+        // [THEN] Refused and nothing changed
+        ReviewLine.Get(Review."Review No.", 'T1');
+        Assert.AreEqual(4.0, ReviewLine."Hours to Bill", 'A sent review must keep the Hours to Bill it was sent with');
+        AssertBuckets('E1', 0, 4, 0, 0, 0, 'A refused percentage must not move any hour');
     end;
 
     [Test]
@@ -2444,20 +2779,16 @@ codeunit 50154 "BCJ Customer Review Tests"
         JobNo := CreateProject('P1', CreateCustomer('C'));
         CreateTask(JobNo, 'T1');
         AddEntry('E1', JobNo, 'T1', D(), 4, "BCJ Billing Status"::Open);
-        CreateOneReview(Review);
-        SetApproved(Review."Review No.", 'T1', 4);
-        CustomerReviewMgt.SubmitReview(Review);
-        Review.Get(Review."Review No.");
+        BCJTestLibrary.ReviewSingleEntry(JiraId('E1'), 4, 4, Review);
         // [WHEN] A percentage is set
         // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
         Commit();
         asserterror CustomerReviewMgt.SetHoursToBillPct(Review, 50);
-        // [THEN] Refused on the status and nothing changed
-        Assert.ExpectedErrorCode('TestField');
+        // [THEN] Refused and nothing changed
         ReviewLine.Get(Review."Review No.", 'T1');
         Assert.AreEqual(4.0, ReviewLine."Hours to Bill", 'An answered review must keep the Hours to Bill the customer answered');
         Assert.AreEqual(4.0, ReviewLine."Approved Hours", 'An answered review must keep the approval the customer gave');
-        AssertEntry('E1', "BCJ Billing Status"::Billable, 4, Review."Review No.", 'A refused percentage must not change the applied allocation');
+        AssertBuckets('E1', 0, 0, 4, 0, 0, 'A refused percentage must not change the applied allocation');
     end;
 
     [Test]
@@ -2469,7 +2800,7 @@ codeunit 50154 "BCJ Customer Review Tests"
     begin
         // [SCENARIO] A cancelled review has been taken back and its hours released; it will never
         // be answered. Changing what it asks for is pointless and would make the historic record
-        // disagree with what the customer was actually sent.
+        // disagree with what was actually prepared.
         // [GIVEN] A cancelled review
         Initialize();
         JobNo := CreateProject('P1', CreateCustomer('C'));
@@ -2482,28 +2813,18 @@ codeunit 50154 "BCJ Customer Review Tests"
         // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
         Commit();
         asserterror CustomerReviewMgt.SetHoursToBillPct(Review, 50);
-        // [THEN] Refused on the status and nothing changed
-        Assert.ExpectedErrorCode('TestField');
+        // [THEN] Refused and nothing changed
         ReviewLine.Get(Review."Review No.", 'T1');
-        Assert.AreEqual(4.0, ReviewLine."Hours to Bill", 'A cancelled review must keep the Hours to Bill it was sent with');
-        AssertEntry('E1', "BCJ Billing Status"::Open, 4, 0, 'A refused percentage must not touch the released entry');
-    end;
-
-    local procedure SetHoursToBill(ReviewNo: Integer; TaskNo: Code[20]; Hours: Decimal)
-    var
-        ReviewLine: Record "BCJ Customer Review Line";
-    begin
-        ReviewLine.Get(ReviewNo, TaskNo);
-        ReviewLine.Validate("Hours to Bill", Hours);
-        ReviewLine.Modify(true);
+        Assert.AreEqual(4.0, ReviewLine."Hours to Bill", 'A cancelled review must keep the Hours to Bill it had');
+        AssertBuckets('E1', 4, 0, 0, 0, 0, 'A refused percentage must not touch the released hours');
     end;
 
     local procedure AssertTaskSnapshot(ReviewLine: Record "BCJ Customer Review Line"; Logged: Decimal; Billed: Decimal; NotBillable: Decimal; NotBilled: Decimal; LineName: Text)
     begin
         Assert.AreEqual(Logged, ReviewLine."Task Logged Hours", LineName + ': Task Logged Hours must be every hour ever logged on the task, whatever the selection');
-        Assert.AreEqual(Billed, ReviewLine."Task Billed Hours", LineName + ': Task Billed Hours must be the allocated hours of Billed and Billable entries, clamped to their logged time');
-        Assert.AreEqual(NotBillable, ReviewLine."Task Not Billable Hours", LineName + ': Task Not Billable Hours must be Not Billable entries plus the unallocated time of Billed and Billable entries');
-        Assert.AreEqual(NotBilled, ReviewLine."Task Not Billed Hours", LineName + ': Task Not Billed Hours must be the undecided hours, Logged - Billed - Not Billable');
+        Assert.AreEqual(Billed, ReviewLine."Task Billed Hours", LineName + ': Task Billed Hours must be the Billed plus Billable hours of the task');
+        Assert.AreEqual(NotBillable, ReviewLine."Task Not Billable Hours", LineName + ': Task Not Billable Hours must be the written-off hours of the task');
+        Assert.AreEqual(NotBilled, ReviewLine."Task Not Billed Hours", LineName + ': Task Not Billed Hours must be the Open plus In Review hours of the task');
     end;
 
     // ---------------------------------------------------------------------------------
@@ -2573,12 +2894,18 @@ codeunit 50154 "BCJ Customer Review Tests"
     local procedure CreateOneReview(var Review: Record "BCJ Customer Review")
     var
         TimeEntry: Record "BCJ Project Time Entry";
-        TempReview: Record "BCJ Customer Review" temporary;
     begin
+        // A Draft review over every Open hour of this test's projects.
         FilterOwnProjects(TimeEntry);
-        Assert.AreEqual(1, CustomerReviewMgt.CreateReviews(TimeEntry, TempReview), 'Fixture: the open entries of this test must produce exactly one review');
-        TempReview.FindFirst();
-        Review.Get(TempReview."Review No.");
+        BCJTestLibrary.CreateDraftReview(TimeEntry, Review);
+    end;
+
+    local procedure CreateSentReview(var Review: Record "BCJ Customer Review")
+    begin
+        // A review over every Open hour of this test's projects, sent unchanged (Hours to Bill =
+        // hours reserved, so Send releases nothing).
+        CreateOneReview(Review);
+        BCJTestLibrary.SendDraftReview(Review);
     end;
 
     local procedure GetReviewOfProject(JobNo: Code[20]; var Review: Record "BCJ Customer Review")
@@ -2589,23 +2916,14 @@ codeunit 50154 "BCJ Customer Review Tests"
         Review.FindFirst();
     end;
 
-    local procedure SetApproved(ReviewNo: Integer; TaskNo: Code[20]; Hours: Decimal)
-    var
-        ReviewLine: Record "BCJ Customer Review Line";
-    begin
-        ReviewLine.Get(ReviewNo, TaskNo);
-        ReviewLine.Validate("Approved Hours", Hours);
-        ReviewLine.Modify(true);
-    end;
-
-    local procedure ApproveAllLogged(ReviewNo: Integer)
+    local procedure ApproveAllHoursToBill(ReviewNo: Integer)
     var
         ReviewLine: Record "BCJ Customer Review Line";
     begin
         ReviewLine.SetRange("Review No.", ReviewNo);
         ReviewLine.FindSet();
         repeat
-            ReviewLine.Validate("Approved Hours", ReviewLine."Logged Hours");
+            ReviewLine.Validate("Approved Hours", ReviewLine."Hours to Bill");
             ReviewLine.Modify(true);
         until ReviewLine.Next() = 0;
     end;
@@ -2613,34 +2931,6 @@ codeunit 50154 "BCJ Customer Review Tests"
     local procedure GetEntry(Suffix: Text; var TimeEntry: Record "BCJ Project Time Entry")
     begin
         TimeEntry.Get(JiraId(Suffix), CopyStr('I-' + JiraId(Suffix), 1, 50));
-    end;
-
-    local procedure SetEntryStatus(Suffix: Text; Status: Enum "BCJ Billing Status")
-    var
-        TimeEntry: Record "BCJ Project Time Entry";
-    begin
-        GetEntry(Suffix, TimeEntry);
-        TimeEntry.Validate("Billing Status", Status);
-        TimeEntry.Modify(true);
-    end;
-
-    local procedure SetBillableHours(Suffix: Text; Hours: Decimal)
-    var
-        TimeEntry: Record "BCJ Project Time Entry";
-    begin
-        // Direct assignment: the fixture is standing in for an allocation a review already made,
-        // without running the review itself.
-        GetEntry(Suffix, TimeEntry);
-        TimeEntry."Billable Hours" := Hours;
-        TimeEntry.Modify(false);
-    end;
-
-    local procedure GetBillableHours(Suffix: Text): Decimal
-    var
-        TimeEntry: Record "BCJ Project Time Entry";
-    begin
-        GetEntry(Suffix, TimeEntry);
-        exit(TimeEntry."Billable Hours");
     end;
 
     local procedure TaskDescription(JobNo: Code[20]; TaskNo: Code[20]): Text[100]
@@ -2655,23 +2945,31 @@ codeunit 50154 "BCJ Customer Review Tests"
     // Assertion helpers
     // ---------------------------------------------------------------------------------
 
-    local procedure AssertEntry(Suffix: Text; ExpectedStatus: Enum "BCJ Billing Status"; ExpectedBillableHours: Decimal; ExpectedReviewNo: Integer; Msg: Text)
+    local procedure AssertBuckets(Suffix: Text; OpenHours: Decimal; InReviewHours: Decimal; BillableHours: Decimal; NotBillableHours: Decimal; BilledHours: Decimal; Msg: Text)
+    begin
+        BCJTestLibrary.AssertBuckets(JiraId(Suffix), OpenHours, InReviewHours, BillableHours, NotBillableHours, BilledHours, Msg);
+    end;
+
+    local procedure AssertStatus(Suffix: Text; ExpectedStatus: Enum "BCJ Billing Status"; Msg: Text)
+    begin
+        BCJTestLibrary.AssertStatus(JiraId(Suffix), ExpectedStatus, Msg);
+    end;
+
+    local procedure AssertOwnInvariant(Context: Text)
     var
         TimeEntry: Record "BCJ Project Time Entry";
     begin
-        GetEntry(Suffix, TimeEntry);
-        Assert.AreEqual(ExpectedStatus, TimeEntry."Billing Status", Msg + ' (billing status)');
-        Assert.AreEqual(ExpectedBillableHours, TimeEntry."Billable Hours", Msg + ' (billable hours)');
-        Assert.AreEqual(ExpectedReviewNo, TimeEntry."Review No.", Msg + ' (review no.)');
+        FilterOwnProjects(TimeEntry);
+        BCJTestLibrary.AssertInvariant(TimeEntry, Context);
     end;
 
     local procedure AssertHours(Buffer: Record "BCJ Billing Overview Buffer" temporary; Total: Decimal; OpenHours: Decimal; SentForReview: Decimal; Billable: Decimal; NotBillable: Decimal; Billed: Decimal; Unbilled: Decimal; LineName: Text)
     begin
         Assert.AreEqual(Total, Buffer."Total Hours", LineName + ': Total Hours must equal every logged hour beneath it');
         Assert.AreEqual(OpenHours, Buffer."Open Hours", LineName + ': Open Hours must equal the hours nobody has decided on yet');
-        Assert.AreEqual(SentForReview, Buffer."Sent for Review Hours", LineName + ': Sent for Review Hours must equal the hours waiting on a customer answer');
-        Assert.AreEqual(Billable, Buffer."Billable Hours", LineName + ': Billable Hours must equal the hours agreed for invoicing and not yet invoiced');
-        Assert.AreEqual(NotBillable, Buffer."Not Billable Hours", LineName + ': Not Billable Hours must equal the hours that will never be charged');
+        Assert.AreEqual(SentForReview, Buffer."Sent for Review Hours", LineName + ': Sent for Review Hours must equal the hours in review');
+        Assert.AreEqual(Billable, Buffer."Billable Hours", LineName + ': Billable Hours must equal the hours approved for invoicing and not yet invoiced');
+        Assert.AreEqual(NotBillable, Buffer."Not Billable Hours", LineName + ': Not Billable Hours must equal the hours written off');
         Assert.AreEqual(Billed, Buffer."Billed Hours", LineName + ': Billed Hours must equal the hours already invoiced');
         Assert.AreEqual(Unbilled, Buffer."Unbilled Hours", LineName + ': Unbilled Hours must equal Open + Sent for Review + Billable');
     end;

@@ -136,33 +136,6 @@ codeunit 50150 "BCJ Billing Status Tests"
     end;
 
     [Test]
-    procedure SetBillingStatusCountExcludesEntriesAlreadyInStatus()
-    var
-        TimeEntry: Record "BCJ Project Time Entry";
-        Stem: Code[13];
-        JobNo: Code[20];
-        Changed: Integer;
-    begin
-        // [SCENARIO] The returned count is shown to the user as "N entries updated". Entries that
-        // already had the status were not updated, so counting them would overstate the change.
-        // [GIVEN] Three entries, one already Billable
-        Stem := BCJTestLibrary.NewStem();
-        JobNo := CreateJobWithTask(Stem);
-        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-1', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::Open);
-        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-2', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 2, "BCJ Billing Status"::Billable);
-        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-3', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 3, "BCJ Billing Status"::"Not Billable");
-        // [WHEN] SetBillingStatus(Billable) on the whole project
-        TimeEntry.Reset();
-        TimeEntry.SetRange("Project No.", JobNo);
-        Changed := BillingMgt.SetBillingStatus(TimeEntry, "BCJ Billing Status"::Billable);
-        // [THEN] Only the two that actually changed are counted, and all three are Billable
-        Assert.AreEqual(2, Changed, 'Entries already in the new status must not be counted as changed');
-        Assert.AreEqual("BCJ Billing Status"::Billable, GetStatus(Stem + '-1'), 'Open entry must become Billable');
-        Assert.AreEqual("BCJ Billing Status"::Billable, GetStatus(Stem + '-2'), 'Already Billable entry must stay Billable');
-        Assert.AreEqual("BCJ Billing Status"::Billable, GetStatus(Stem + '-3'), 'Not Billable entry must become Billable');
-    end;
-
-    [Test]
     procedure SetBillingStatusOnEmptySetReturnsZero()
     var
         TimeEntry: Record "BCJ Project Time Entry";
@@ -180,6 +153,40 @@ codeunit 50150 "BCJ Billing Status Tests"
         Assert.AreEqual(0, Changed, 'An empty filter result must return 0 changed entries');
     end;
 
+
+    [Test]
+    procedure SetBillingStatusBillableMovesOnlyOpenHoursAndCountsChangedEntries()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        Stem: Code[13];
+        JobNo: Code[20];
+        Changed: Integer;
+    begin
+        // [SCENARIO] Mark Billable is an hour move, Open -> manual Billable (contract table in
+        // "Codeunit 50103"). An entry already Billable has no Open hours to move, and an entry the
+        // consultant wrote off stays written off - Mark Billable does not silently reverse a
+        // write-off; that is what Mark Open is for. The returned count is shown as "N entries
+        // updated", so only entries whose buckets actually changed may be counted.
+        // [GIVEN] An Open entry, a Billable entry and a Not Billable entry
+        Stem := BCJTestLibrary.NewStem();
+        JobNo := CreateJobWithTask(Stem);
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-1', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::Open);
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-2', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 2, "BCJ Billing Status"::Billable);
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-3', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 3, "BCJ Billing Status"::"Not Billable");
+        // [WHEN] SetBillingStatus(Billable) on the whole project
+        TimeEntry.Reset();
+        TimeEntry.SetRange("Project No.", JobNo);
+        Changed := BillingMgt.SetBillingStatus(TimeEntry, "BCJ Billing Status"::Billable);
+        // [THEN] Only the Open entry changed; the write-off stands
+        Assert.AreEqual(1, Changed, 'Only the entry that had Open hours to move may be counted as changed');
+        BCJTestLibrary.AssertBuckets(Stem + '-1', 0, 0, 1, 0, 0, 'The Open hour must move to Billable');
+        BCJTestLibrary.AssertBuckets(Stem + '-2', 0, 0, 2, 0, 0, 'An already Billable entry must stay exactly as it was');
+        BCJTestLibrary.AssertBuckets(Stem + '-3', 0, 0, 0, 3, 0, 'Mark Billable must not reverse a write-off - it moves Open hours only');
+        TimeEntry.Reset();
+        TimeEntry.SetRange("Project No.", JobNo);
+        BCJTestLibrary.AssertInvariant(TimeEntry, 'After Mark Billable');
+    end;
+
     [Test]
     procedure SetBillingStatusPersistsStatusAndLegacyFlags()
     var
@@ -188,134 +195,216 @@ codeunit 50150 "BCJ Billing Status Tests"
         Stem: Code[13];
         JobNo: Code[20];
     begin
-        // [SCENARIO] SetBillingStatus must go through Validate so the legacy flags that the old page
-        // and existing reports read stay consistent with the new status in the database.
+        // [SCENARIO] The old time-entry page and existing reports read Is Billable / Is Billed, so
+        // the derived Billing Status and the legacy flags must be stored with every move:
+        // Billable -> Is Billable only, Billed -> both. Mark Not Billable afterwards writes off
+        // Open hours only, so an invoiced entry is not touched by it - an invoice exists.
         // [GIVEN] One open entry with no flags
         Stem := BCJTestLibrary.NewStem();
         JobNo := CreateJobWithTask(Stem);
         BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-1', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::Open);
         TimeEntry.Reset();
         TimeEntry.SetRange("Project No.", JobNo);
-        // [WHEN] Status set to Billed
+        // [WHEN] Marked Billable
+        BillingMgt.SetBillingStatus(TimeEntry, "BCJ Billing Status"::Billable);
+        // [THEN] Stored Billable with Is Billable only
+        Stored.Get(Stem + '-1', 'I-' + Stem + '-1');
+        Assert.AreEqual("BCJ Billing Status"::Billable, Stored."Billing Status", 'Billable status must be persisted');
+        Assert.IsTrue(Stored."Is Billable", 'Persisted Billable entry must have Is Billable set');
+        Assert.IsFalse(Stored."Is Billed", 'Persisted Billable entry must not have Is Billed set');
+        // [WHEN] Marked Billed
         BillingMgt.SetBillingStatus(TimeEntry, "BCJ Billing Status"::Billed);
-        // [THEN] Stored entry is Billed with both flags set
+        // [THEN] Stored Billed with both flags set
         Stored.Get(Stem + '-1', 'I-' + Stem + '-1');
         Assert.AreEqual("BCJ Billing Status"::Billed, Stored."Billing Status", 'Billed status must be persisted');
         Assert.IsTrue(Stored."Is Billable", 'Persisted Billed entry must have Is Billable set');
         Assert.IsTrue(Stored."Is Billed", 'Persisted Billed entry must have Is Billed set');
-
-        // [WHEN] Status then set to Not Billable
-        BillingMgt.SetBillingStatus(TimeEntry, "BCJ Billing Status"::"Not Billable");
-        // [THEN] Stored entry has both flags cleared
+        BCJTestLibrary.AssertBuckets(Stem + '-1', 0, 0, 0, 0, 1, 'The billed hour must sit in Billed');
+        // [WHEN] Then marked Not Billable
+        Assert.AreEqual(0, BillingMgt.SetBillingStatus(TimeEntry, "BCJ Billing Status"::"Not Billable"), 'An invoiced entry has no Open hours to write off, so nothing may be counted as changed');
+        // [THEN] Still Billed
         Stored.Get(Stem + '-1', 'I-' + Stem + '-1');
-        Assert.AreEqual("BCJ Billing Status"::"Not Billable", Stored."Billing Status", 'Not Billable status must be persisted');
-        Assert.IsFalse(Stored."Is Billable", 'Persisted Not Billable entry must have Is Billable cleared');
-        Assert.IsFalse(Stored."Is Billed", 'Persisted Not Billable entry must have Is Billed cleared');
+        Assert.AreEqual("BCJ Billing Status"::Billed, Stored."Billing Status", 'Mark Not Billable must never write off invoiced hours');
+        BCJTestLibrary.AssertBuckets(Stem + '-1', 0, 0, 0, 0, 1, 'Mark Not Billable must leave invoiced hours in Billed');
     end;
 
-    // ---------------------------------------------------------------------------------
-    // SyncStatusFromLegacyFlags
-    // ---------------------------------------------------------------------------------
+    [Test]
+    procedure MarkBilledBillsOnlyBillableHours()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        Review: Record "BCJ Customer Review";
+        InReviewReview: Record "BCJ Customer Review";
+        Stem: Code[13];
+        JobNo: Code[20];
+        Changed: Integer;
+    begin
+        // [SCENARIO] Business flow step 6: "Mark Billed bills only Billable hours, never Open
+        // ones". Marking a whole project Billed after the invoice run must invoice what was
+        // approved (by a review or by hand) and nothing else - undecided hours and hours still
+        // with the customer were not on the invoice, and billing them would make them vanish
+        // from every later review and invoice.
+        // [GIVEN] E1 4 h of which a review approved 2 (2 Open), E2 3 h manual Billable,
+        // E3 1 h Open, E4 2 h in a sent review
+        Stem := BCJTestLibrary.NewStem();
+        JobNo := CreateJobWithTask(Stem);
+        BCJTestLibrary.EnsureSetup('https://review.example.com');
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-1', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 4, "BCJ Billing Status"::Open);
+        BCJTestLibrary.ReviewSingleEntry(Stem + '-1', 4, 2, Review);
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-2', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 3, "BCJ Billing Status"::Billable);
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-3', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::Open);
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-4', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 2, "BCJ Billing Status"::Open);
+        TimeEntry.Reset();
+        TimeEntry.SetRange("Jira ID", Stem + '-4');
+        BCJTestLibrary.CreateDraftReview(TimeEntry, InReviewReview);
+        BCJTestLibrary.SendDraftReview(InReviewReview);
+        BCJTestLibrary.AssertBuckets(Stem + '-1', 2, 0, 2, 0, 0, 'Fixture: E1 must be 2 approved + 2 Open');
+        // [WHEN] The whole project is marked Billed
+        TimeEntry.Reset();
+        TimeEntry.SetRange("Project No.", JobNo);
+        Changed := BillingMgt.SetBillingStatus(TimeEntry, "BCJ Billing Status"::Billed);
+        // [THEN] Only Billable hours were billed
+        Assert.AreEqual(2, Changed, 'Only the two entries holding Billable hours may be counted as changed');
+        BCJTestLibrary.AssertBuckets(Stem + '-1', 2, 0, 0, 0, 2, 'The review-approved hours must be billed and the Open remainder must stay Open');
+        BCJTestLibrary.AssertBuckets(Stem + '-2', 0, 0, 0, 0, 3, 'Manually approved hours must be billed');
+        BCJTestLibrary.AssertBuckets(Stem + '-3', 1, 0, 0, 0, 0, 'Open hours must never be billed by Mark Billed');
+        BCJTestLibrary.AssertBuckets(Stem + '-4', 0, 2, 0, 0, 0, 'Hours still with the customer must never be billed by Mark Billed');
+        BCJTestLibrary.AssertStatus(Stem + '-1', "BCJ Billing Status"::Open, 'An entry with Open hours left shows Open, whatever else it holds');
+        BCJTestLibrary.AssertInvariant(TimeEntry, 'After Mark Billed');
+    end;
 
     [Test]
-    procedure SyncPromotesOpenEntriesFromLegacyFlags()
+    procedure MarkNotBillableWritesOffOnlyOpenHours()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        Review: Record "BCJ Customer Review";
+        DraftReview: Record "BCJ Customer Review";
+        Stem: Code[13];
+        JobNo: Code[20];
+        Changed: Integer;
+    begin
+        // [SCENARIO] Writing off is a decision about undecided hours only. Hours reserved in a
+        // review belong to that review until it is sent, answered or cancelled, and hours the
+        // customer approved can only be taken back by reopening that review (business flow
+        // step 7) - so neither may be written off from the overview.
+        // [GIVEN] E1 4 h with 2 approved by a review and 2 Open, E2 3 h in a draft review,
+        // E3 1 h Open, E4 2 h manual Billable
+        Stem := BCJTestLibrary.NewStem();
+        JobNo := CreateJobWithTask(Stem);
+        BCJTestLibrary.EnsureSetup('https://review.example.com');
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-1', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 4, "BCJ Billing Status"::Open);
+        BCJTestLibrary.ReviewSingleEntry(Stem + '-1', 4, 2, Review);
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-2', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 3, "BCJ Billing Status"::Open);
+        TimeEntry.Reset();
+        TimeEntry.SetRange("Jira ID", Stem + '-2');
+        BCJTestLibrary.CreateDraftReview(TimeEntry, DraftReview);
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-3', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::Open);
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-4', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 2, "BCJ Billing Status"::Billable);
+        // [WHEN] The whole project is marked Not Billable
+        TimeEntry.Reset();
+        TimeEntry.SetRange("Project No.", JobNo);
+        Changed := BillingMgt.SetBillingStatus(TimeEntry, "BCJ Billing Status"::"Not Billable");
+        // [THEN] Only Open hours were written off
+        Assert.AreEqual(2, Changed, 'Only the two entries holding Open hours may be counted as changed');
+        BCJTestLibrary.AssertBuckets(Stem + '-1', 0, 0, 2, 2, 0, 'Only the Open remainder may be written off; the review-approved hours stay Billable');
+        BCJTestLibrary.AssertBuckets(Stem + '-2', 0, 3, 0, 0, 0, 'Hours reserved in a draft review must not be written off');
+        BCJTestLibrary.AssertBuckets(Stem + '-3', 0, 0, 0, 1, 0, 'Open hours must be written off');
+        BCJTestLibrary.AssertBuckets(Stem + '-4', 0, 0, 2, 0, 0, 'Manually approved hours have no Open hours to write off and must stay Billable');
+        BCJTestLibrary.AssertInvariant(TimeEntry, 'After Mark Not Billable');
+    end;
+
+    [Test]
+    procedure MarkOpenReturnsManualDecisionsButNotReviewApprovedHours()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        Review: Record "BCJ Customer Review";
+        DraftReview: Record "BCJ Customer Review";
+        Stem: Code[13];
+        JobNo: Code[20];
+        Changed: Integer;
+    begin
+        // [SCENARIO] Mark Open undoes the consultant's own overview decisions (manual Billable,
+        // manual Not Billable). It must not undo the customer's approval: those hours can only
+        // be taken back by reopening their review (business flow step 7), and it must not pull
+        // hours out of a review that is being prepared.
+        // [GIVEN] E1 3 h manual Billable, E2 2 h manual Not Billable, E3 4 h of which a review
+        // approved 2 (2 Open), E4 2 h in a draft review
+        Stem := BCJTestLibrary.NewStem();
+        JobNo := CreateJobWithTask(Stem);
+        BCJTestLibrary.EnsureSetup('https://review.example.com');
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-1', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 3, "BCJ Billing Status"::Billable);
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-2', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 2, "BCJ Billing Status"::"Not Billable");
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-3', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 4, "BCJ Billing Status"::Open);
+        BCJTestLibrary.ReviewSingleEntry(Stem + '-3', 4, 2, Review);
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-4', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 2, "BCJ Billing Status"::Open);
+        TimeEntry.Reset();
+        TimeEntry.SetRange("Jira ID", Stem + '-4');
+        BCJTestLibrary.CreateDraftReview(TimeEntry, DraftReview);
+        // [WHEN] The whole project is marked Open
+        TimeEntry.Reset();
+        TimeEntry.SetRange("Project No.", JobNo);
+        Changed := BillingMgt.SetBillingStatus(TimeEntry, "BCJ Billing Status"::Open);
+        // [THEN] Only the manual decisions were undone
+        Assert.AreEqual(2, Changed, 'Only the entries with manual Billable or manual Not Billable hours may be counted as changed');
+        BCJTestLibrary.AssertBuckets(Stem + '-1', 3, 0, 0, 0, 0, 'Manual Billable hours must return to Open');
+        BCJTestLibrary.AssertBuckets(Stem + '-2', 2, 0, 0, 0, 0, 'Manual Not Billable hours must return to Open');
+        BCJTestLibrary.AssertBuckets(Stem + '-3', 2, 0, 2, 0, 0, 'Hours approved by the customer must stay Billable - only Reopen of the review takes them back');
+        BCJTestLibrary.AssertBuckets(Stem + '-4', 0, 2, 0, 0, 0, 'Hours reserved in a draft review must stay in review');
+        BCJTestLibrary.AssertStatus(Stem + '-1', "BCJ Billing Status"::Open, 'An entry returned to Open must show Open');
+        BCJTestLibrary.AssertInvariant(TimeEntry, 'After Mark Open');
+    end;
+
+    [Test]
+    procedure MarkOpenOnBilledEntryReturnsItToBillable()
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        Stored: Record "BCJ Project Time Entry";
+        Stem: Code[13];
+        JobNo: Code[20];
+    begin
+        // [SCENARIO] Contract table, NewStatus Open: "Billed -> Billable". Undoing an invoice (the
+        // page asks for confirmation first) takes the hours back one step - approved but not
+        // invoiced - not all the way back to undecided: the approval itself was never wrong.
+        // Mark Open is one move per entry, so a second Mark Open is what returns them to Open.
+        // [GIVEN] An entry billed by hand (manual Billable, then Billed)
+        Stem := BCJTestLibrary.NewStem();
+        JobNo := CreateJobWithTask(Stem);
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-1', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 3, "BCJ Billing Status"::Billed);
+        // [WHEN] Marked Open
+        Assert.AreEqual(1, BCJTestLibrary.MarkEntryById(Stem + '-1', "BCJ Billing Status"::Open), 'Un-billing an entry must count it as changed');
+        // [THEN] The hours are Billable again, with the legacy flags following
+        BCJTestLibrary.AssertBuckets(Stem + '-1', 0, 0, 3, 0, 0, 'Mark Open on a Billed entry must move Billed back to Billable');
+        Stored.Get(Stem + '-1', 'I-' + Stem + '-1');
+        Assert.AreEqual("BCJ Billing Status"::Billable, Stored."Billing Status", 'An un-billed entry must show Billable');
+        Assert.IsTrue(Stored."Is Billable", 'An un-billed entry must keep Is Billable');
+        Assert.IsFalse(Stored."Is Billed", 'An un-billed entry must clear Is Billed');
+        // [WHEN] Marked Open again
+        BCJTestLibrary.MarkEntryById(Stem + '-1', "BCJ Billing Status"::Open);
+        // [THEN] Now the manual Billable hours return to Open
+        BCJTestLibrary.AssertBuckets(Stem + '-1', 3, 0, 0, 0, 0, 'A second Mark Open must return the manual Billable hours to Open');
+    end;
+
+    [Test]
+    procedure SetBillingStatusSentForReviewIsRefused()
     var
         TimeEntry: Record "BCJ Project Time Entry";
         Stem: Code[13];
         JobNo: Code[20];
     begin
-        // [SCENARIO] Users still tick Is Billable / Is Billed on the old page, which does not touch
-        // Billing Status. The sync picks those decisions up for undecided (Open) entries so the new
-        // overview does not show already-invoiced hours as unbilled. Is Billed wins over Is Billable.
-        // [GIVEN] Four Open entries with each flag combination
+        // [SCENARIO] Hours only go into review through a customer review (CreateReviews), which
+        // is what records which review holds them. A bare status change to Sent for Review would
+        // park hours in no review at all, where nothing can ever release them.
+        // [GIVEN] An Open entry
         Stem := BCJTestLibrary.NewStem();
         JobNo := CreateJobWithTask(Stem);
-        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-BILLED', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::Open);
-        BCJTestLibrary.SetLegacyFlags(TimeEntry, false, true);
-        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-BILLABLE', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::Open);
-        BCJTestLibrary.SetLegacyFlags(TimeEntry, true, false);
-        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-BOTH', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::Open);
-        BCJTestLibrary.SetLegacyFlags(TimeEntry, true, true);
-        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-NONE', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::Open);
-        // [WHEN] Sync runs
-        BillingMgt.SyncStatusFromLegacyFlags();
-        // [THEN] Status follows the flags, flags themselves are untouched
-        Assert.AreEqual("BCJ Billing Status"::Billed, GetStatus(Stem + '-BILLED'), 'Open entry with Is Billed must become Billed');
-        Assert.AreEqual("BCJ Billing Status"::Billable, GetStatus(Stem + '-BILLABLE'), 'Open entry with Is Billable must become Billable');
-        Assert.AreEqual("BCJ Billing Status"::Billed, GetStatus(Stem + '-BOTH'), 'Open entry with both flags must become Billed');
-        Assert.AreEqual("BCJ Billing Status"::Open, GetStatus(Stem + '-NONE'), 'Open entry without flags must stay Open');
-        AssertFlags(Stem + '-BILLED', false, true, 'Sync must not change the legacy flags of a synced entry');
-        AssertFlags(Stem + '-BILLABLE', true, false, 'Sync must not change the legacy flags of a synced entry');
-        AssertFlags(Stem + '-NONE', false, false, 'Sync must not change the legacy flags of an Open entry');
-    end;
-
-    [Test]
-    procedure SyncLeavesNonOpenEntriesWithoutIsBilledUntouched()
-    var
-        TimeEntry: Record "BCJ Project Time Entry";
-        Stem: Code[13];
-        JobNo: Code[20];
-    begin
-        // [SCENARIO] Apart from a set Is Billed flag (see SyncIsBilledFlagWinsOverAnyStatus), a
-        // status set in the new overview is an explicit user decision and outranks the legacy
-        // flags. A stale Is Billable left ticked on an entry later marked Not Billable must not
-        // re-promote it, and cleared flags must never demote a Billed or Billable entry - the old
-        // page cannot un-bill anything, so cleared flags carry no decision.
-        // [GIVEN] Non-Open entries without Is Billed: Not Billable + Is Billable, Billed + no
-        // flags, Billable + no flags
-        Stem := BCJTestLibrary.NewStem();
-        JobNo := CreateJobWithTask(Stem);
-        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-NB', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::"Not Billable");
-        BCJTestLibrary.SetLegacyFlags(TimeEntry, true, false);
-        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-BD', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::Billed);
-        BCJTestLibrary.SetLegacyFlags(TimeEntry, false, false);
-        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-BL', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::Billable);
-        BCJTestLibrary.SetLegacyFlags(TimeEntry, false, false);
-        // [WHEN] Sync runs
-        BillingMgt.SyncStatusFromLegacyFlags();
-        // [THEN] Every status and every flag is unchanged
-        Assert.AreEqual("BCJ Billing Status"::"Not Billable", GetStatus(Stem + '-NB'), 'Not Billable entry must stay Not Billable despite a stale Is Billable');
-        Assert.AreEqual("BCJ Billing Status"::Billed, GetStatus(Stem + '-BD'), 'Billed entry must stay Billed despite cleared flags');
-        Assert.AreEqual("BCJ Billing Status"::Billable, GetStatus(Stem + '-BL'), 'Billable entry must stay Billable when no flag is set');
-        AssertFlags(Stem + '-NB', true, false, 'Sync must not change the legacy flags of an untouched entry');
-        AssertFlags(Stem + '-BD', false, false, 'Sync must not change the legacy flags of an untouched entry');
-        AssertFlags(Stem + '-BL', false, false, 'Sync must not change the legacy flags of an untouched entry');
-    end;
-
-    [Test]
-    procedure SyncIsBilledFlagWinsOverAnyStatus()
-    var
-        TimeEntry: Record "BCJ Project Time Entry";
-        Stem: Code[13];
-        JobNo: Code[20];
-    begin
-        // [SCENARIO] The legacy page "BCJ Jira Time Entries" marks entries invoiced by setting only
-        // Is Billed (ModifyAll, no validation). Under the old "only Open is promoted" rule an entry
-        // already Billable kept showing as unbilled and could be invoiced a second time. Is Billed
-        // records that an invoice exists, which is a fact, not a preference - so it always wins,
-        // whatever status the entry currently has.
-        // [GIVEN] Billable, Not Billable and Open entries with Is Billed set (Is Billable varied)
-        Stem := BCJTestLibrary.NewStem();
-        JobNo := CreateJobWithTask(Stem);
-        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-BL', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::Billable);
-        BCJTestLibrary.SetLegacyFlags(TimeEntry, true, true);
-        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-BLX', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::Billable);
-        BCJTestLibrary.SetLegacyFlags(TimeEntry, false, true);
-        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-NB', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::"Not Billable");
-        BCJTestLibrary.SetLegacyFlags(TimeEntry, false, true);
-        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-OP', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 1, "BCJ Billing Status"::Open);
-        BCJTestLibrary.SetLegacyFlags(TimeEntry, false, true);
-        // [WHEN] Sync runs
-        BillingMgt.SyncStatusFromLegacyFlags();
-        // [THEN] Every entry is Billed and its legacy flags are exactly as they were
-        Assert.AreEqual("BCJ Billing Status"::Billed, GetStatus(Stem + '-BL'), 'Billable entry with Is Billed must become Billed');
-        Assert.AreEqual("BCJ Billing Status"::Billed, GetStatus(Stem + '-BLX'), 'Billable entry with Is Billed but no Is Billable must become Billed');
-        Assert.AreEqual("BCJ Billing Status"::Billed, GetStatus(Stem + '-NB'), 'Not Billable entry with Is Billed must become Billed');
-        Assert.AreEqual("BCJ Billing Status"::Billed, GetStatus(Stem + '-OP'), 'Open entry with Is Billed must become Billed');
-        AssertFlags(Stem + '-BL', true, true, 'Sync must not change the legacy flags of an entry it marks Billed');
-        AssertFlags(Stem + '-BLX', false, true, 'Sync must not change the legacy flags of an entry it marks Billed');
-        AssertFlags(Stem + '-NB', false, true, 'Sync must not change the legacy flags of an entry it marks Billed');
-        AssertFlags(Stem + '-OP', false, true, 'Sync must not change the legacy flags of an entry it marks Billed');
+        BCJTestLibrary.CreateTimeEntry(TimeEntry, Stem + '-1', JobNo, 'T1', Stem, BCJTestLibrary.BaseDate(), 2, "BCJ Billing Status"::Open);
+        TimeEntry.Reset();
+        TimeEntry.SetRange("Project No.", JobNo);
+        // [WHEN] SetBillingStatus(Sent for Review)
+        // Commit so the fixtures survive the rollback that asserterror performs - the runner still rolls the whole codeunit back, so nothing persists.
+        Commit();
+        asserterror BillingMgt.SetBillingStatus(TimeEntry, "BCJ Billing Status"::"Sent for Review");
+        // [THEN] Refused and nothing moved
+        BCJTestLibrary.AssertBuckets(Stem + '-1', 2, 0, 0, 0, 0, 'A refused Sent for Review must leave the entry fully Open');
     end;
 
     // ---------------------------------------------------------------------------------
@@ -325,9 +414,12 @@ codeunit 50150 "BCJ Billing Status Tests"
     local procedure CreateJobWithTask(Stem: Code[13]): Code[20]
     var
         JobNo: Code[20];
+        CustomerNo: Code[20];
     begin
         JobNo := Stem + 'P';
-        BCJTestLibrary.CreateJob(JobNo, '', 'Project ' + Stem);
+        CustomerNo := Stem + 'C';
+        BCJTestLibrary.CreateCustomer(CustomerNo, 'Customer ' + Stem);
+        BCJTestLibrary.CreateJob(JobNo, CustomerNo, 'Project ' + Stem);
         BCJTestLibrary.CreateJobTask(JobNo, 'T1', 'Task ' + Stem, '');
         exit(JobNo);
     end;
@@ -338,14 +430,5 @@ codeunit 50150 "BCJ Billing Status Tests"
     begin
         TimeEntry.Get(JiraId, CopyStr('I-' + JiraId, 1, 50));
         exit(TimeEntry."Billing Status");
-    end;
-
-    local procedure AssertFlags(JiraId: Text[50]; ExpectedIsBillable: Boolean; ExpectedIsBilled: Boolean; Msg: Text)
-    var
-        TimeEntry: Record "BCJ Project Time Entry";
-    begin
-        TimeEntry.Get(JiraId, CopyStr('I-' + JiraId, 1, 50));
-        Assert.AreEqual(ExpectedIsBillable, TimeEntry."Is Billable", Msg);
-        Assert.AreEqual(ExpectedIsBilled, TimeEntry."Is Billed", Msg);
     end;
 }

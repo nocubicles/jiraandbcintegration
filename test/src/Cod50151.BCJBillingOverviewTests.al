@@ -14,6 +14,9 @@ codeunit 50151 "BCJ Billing Overview Tests"
     //   Customer CustB
     //     JobB  T1   E6 D   1.00 Billable | E7 D+2 2.00 Billed
     //
+    // Entry states are reached through the real overview actions (BCJ Test Library CreateTimeEntry
+    // drives SetBillingStatus), so every entry holds all its hours in the one bucket named above.
+    //
     // All keys derive from a fresh GUID stem, and every TimeEntryFilter is constrained to
     // "Project No." = Stem* so real synced Jira data in the sandbox never enters the result.
 
@@ -511,16 +514,18 @@ codeunit 50151 "BCJ Billing Overview Tests"
     begin
         // [SCENARIO] Marking a task as Billed for January must not mark the same task's February
         // worklogs: they have not been invoiced yet and would silently drop out of the next invoice.
+        // Mark Billed bills Billable hours only (hour-allocation contract), so inside the period
+        // the written-off worklog stays written off - it was never on the invoice.
         // [GIVEN] The standard scenario, filtered to posting date D
         CreateScenario();
         FilterOwnProjects(TimeEntryFilter);
         TimeEntryFilter.SetRange("Posting Date", BCJTestLibrary.BaseDate());
         // [WHEN] Task A1/T1 is set to Billed
         Changed := OverviewMgt.SetStatusForLine(MakeLine(LineType::Task, CustA, JobA1, 'T1', ''), TimeEntryFilter, "BCJ Billing Status"::Billed);
-        // [THEN] E2 and E3 (date D) are Billed; E1 (D+1) is untouched
-        Assert.AreEqual(2, Changed, 'Only entries of the task inside the posting date filter may be changed');
-        Assert.AreEqual("BCJ Billing Status"::Billed, GetStatus('E2'), 'Entry of the task inside the date filter must be Billed');
-        Assert.AreEqual("BCJ Billing Status"::Billed, GetStatus('E3'), 'Entry of the task inside the date filter must be Billed');
+        // [THEN] E2 (Billable, date D) is Billed; E3 (Not Billable) and E1 (D+1) are untouched
+        Assert.AreEqual(1, Changed, 'Only the Billable entry of the task inside the posting date filter may be changed');
+        Assert.AreEqual("BCJ Billing Status"::Billed, GetStatus('E2'), 'Billable entry of the task inside the date filter must be Billed');
+        Assert.AreEqual("BCJ Billing Status"::"Not Billable", GetStatus('E3'), 'A written-off entry must never be billed by Mark Billed');
         Assert.AreEqual("BCJ Billing Status"::Open, GetStatus('E1'), 'Entry of the same task outside the date filter must stay Open');
         Assert.AreEqual("BCJ Billing Status"::Open, GetStatus('E5'), 'Entry of another project must stay untouched');
     end;
@@ -555,15 +560,19 @@ codeunit 50151 "BCJ Billing Overview Tests"
         Changed: Integer;
     begin
         // [SCENARIO] Acting on one customer's row must never change another customer's or the
-        // unassigned projects' worklogs.
+        // unassigned projects' worklogs. Mark Not Billable writes off Open hours only
+        // (hour-allocation contract), so customer A's approved and invoiced hours stand.
         // [GIVEN] The standard scenario
         CreateScenario();
         FilterOwnProjects(TimeEntryFilter);
         // [WHEN] Customer A is set to Not Billable
         Changed := OverviewMgt.SetStatusForLine(MakeLine(LineType::Customer, CustA, '', '', ''), TimeEntryFilter, "BCJ Billing Status"::"Not Billable");
-        // [THEN] E1, E2, E4, E5 changed (E3 already Not Billable); other customers untouched
-        Assert.AreEqual(4, Changed, 'All of customer A''s entries not yet Not Billable must be changed');
-        Assert.AreEqual("BCJ Billing Status"::"Not Billable", GetStatus('E4'), 'Customer A''s Billed entry must become Not Billable');
+        // [THEN] E1 and E5 (the Open ones) changed; E2 Billable and E4 Billed kept; other customers untouched
+        Assert.AreEqual(2, Changed, 'Only customer A''s entries with Open hours may be changed');
+        Assert.AreEqual("BCJ Billing Status"::"Not Billable", GetStatus('E1'), 'Customer A''s Open entry must be written off');
+        Assert.AreEqual("BCJ Billing Status"::"Not Billable", GetStatus('E5'), 'Customer A''s Open entry must be written off');
+        Assert.AreEqual("BCJ Billing Status"::Billable, GetStatus('E2'), 'Customer A''s Billable entry must not be written off');
+        Assert.AreEqual("BCJ Billing Status"::Billed, GetStatus('E4'), 'Customer A''s Billed entry must never be written off');
         Assert.AreEqual("BCJ Billing Status"::Billable, GetStatus('E6'), 'Customer B''s entry must stay untouched');
         Assert.AreEqual("BCJ Billing Status"::Open, GetStatus('E9'), 'Unassigned project''s entry must stay untouched');
     end;
@@ -581,10 +590,10 @@ codeunit 50151 "BCJ Billing Overview Tests"
         FilterOwnProjects(TimeEntryFilter);
         // [WHEN] The blank customer is set to Billable
         Changed := OverviewMgt.SetStatusForLine(MakeLine(LineType::Customer, '', '', '', ''), TimeEntryFilter, "BCJ Billing Status"::Billable);
-        // [THEN] E8 and E9 changed; customer A's Open entry untouched
-        Assert.AreEqual(2, Changed, 'Both entries of the project without Bill-to customer must be changed');
-        Assert.AreEqual("BCJ Billing Status"::Billable, GetStatus('E8'), 'Unassigned project entry must become Billable');
-        Assert.AreEqual("BCJ Billing Status"::Billable, GetStatus('E9'), 'Unassigned project entry must become Billable');
+        // [THEN] E9 (Open) changed; E8 stays written off (Billable moves Open hours only); customer A untouched
+        Assert.AreEqual(1, Changed, 'Only the Open entry of the project without Bill-to customer may be changed');
+        Assert.AreEqual("BCJ Billing Status"::"Not Billable", GetStatus('E8'), 'A written-off entry must not be made Billable by Mark Billable');
+        Assert.AreEqual("BCJ Billing Status"::Billable, GetStatus('E9'), 'Unassigned project Open entry must become Billable');
         Assert.AreEqual("BCJ Billing Status"::Open, GetStatus('E1'), 'Customer A''s entry must stay untouched');
     end;
 

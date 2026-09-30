@@ -4,43 +4,40 @@ codeunit 50105 "BCJ Upgrade"
 
     trigger OnUpgradePerCompany()
     begin
-        UpgradeBillingStatus();
-        UpgradeBillableHours();
+        UpgradeHourAllocation();
+        // The billing status and billable hours upgrades of 1.1 are superseded by the hour allocation migration:
+        // their tags only need to exist so they never run on data that is already in the new model.
+        SetTagIfMissing(GetBillingStatusUpgradeTag());
+        SetTagIfMissing(GetBillableHoursUpgradeTag());
     end;
 
-    local procedure UpgradeBillableHours()
+    local procedure UpgradeHourAllocation()
     var
-        TimeEntry: Record "BCJ Project Time Entry";
+        HourAllocationMgt: Codeunit "BCJ Hour Allocation Mgt.";
         UpgradeTag: Codeunit "Upgrade Tag";
     begin
-        if UpgradeTag.HasUpgradeTag(GetBillableHoursUpgradeTag()) then
+        if UpgradeTag.HasUpgradeTag(GetHourAllocationUpgradeTag()) then
             exit;
-        // Existing entries get their logged hours as billable hours. Modify(false): no trigger, no flag sync.
-        TimeEntry.SetRange("Billable Hours", 0);
-        TimeEntry.SetFilter("Time Spent in Hours", '<>%1', 0);
-        TimeEntry.SetLoadFields("Time Spent in Hours", "Billable Hours");
-        if TimeEntry.FindSet(true) then
-            repeat
-                TimeEntry."Billable Hours" := TimeEntry."Time Spent in Hours";
-                TimeEntry.Modify(false);
-            until TimeEntry.Next() = 0;
-        UpgradeTag.SetUpgradeTag(GetBillableHoursUpgradeTag());
+        HourAllocationMgt.MigrateLegacyEntries();
+        UpgradeTag.SetUpgradeTag(GetHourAllocationUpgradeTag());
+    end;
+
+    local procedure SetTagIfMissing(Tag: Code[250])
+    var
+        UpgradeTag: Codeunit "Upgrade Tag";
+    begin
+        if not UpgradeTag.HasUpgradeTag(Tag) then
+            UpgradeTag.SetUpgradeTag(Tag);
+    end;
+
+    procedure GetHourAllocationUpgradeTag(): Code[250]
+    begin
+        exit('BCJ-HOURALLOCATION-20261001');
     end;
 
     procedure GetBillableHoursUpgradeTag(): Code[250]
     begin
         exit('BCJ-BILLABLEHOURS-20260922');
-    end;
-
-    local procedure UpgradeBillingStatus()
-    var
-        UpgradeTag: Codeunit "Upgrade Tag";
-        BillingMgt: Codeunit "BCJ Billing Mgt.";
-    begin
-        if UpgradeTag.HasUpgradeTag(GetBillingStatusUpgradeTag()) then
-            exit;
-        BillingMgt.SyncStatusFromLegacyFlags();
-        UpgradeTag.SetUpgradeTag(GetBillingStatusUpgradeTag());
     end;
 
     procedure GetBillingStatusUpgradeTag(): Code[250]
@@ -53,5 +50,6 @@ codeunit 50105 "BCJ Upgrade"
     begin
         PerCompanyUpgradeTags.Add(GetBillingStatusUpgradeTag());
         PerCompanyUpgradeTags.Add(GetBillableHoursUpgradeTag());
+        PerCompanyUpgradeTags.Add(GetHourAllocationUpgradeTag());
     end;
 }

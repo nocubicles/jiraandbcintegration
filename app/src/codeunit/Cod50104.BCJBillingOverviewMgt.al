@@ -129,12 +129,11 @@ codeunit 50104 "BCJ Billing Overview Mgt."
         TimeEntry: Record "BCJ Project Time Entry";
         Job: Record Job;
         CustomerByProject: Dictionary of [Code[20], Code[20]];
-        ReviewShares: Dictionary of [Text, Decimal];
-        SharedReviewTasks: Dictionary of [Text, Boolean];
         EntryNo: Integer;
     begin
         TimeEntry.CopyFilters(TimeEntryFilter);
-        TimeEntry.SetLoadFields("Project No.", "Project Task No.", "BC Resource No.", "Posting Date", "Time Spent in Hours", "Billable Hours", "Billing Status", "Review No.");
+        TimeEntry.SetLoadFields("Project No.", "Project Task No.", "BC Resource No.", "Posting Date", "Time Spent in Hours", "Billing Status",
+            "Open Hours", "In Review Hours", "Billable Hours", "Billed Hours", "Not Billable Hours", "Unbilled Hours");
         if IncludeTimeEntries then
             TimeEntry.AddLoadFields(Comment);
         if not TimeEntry.FindSet() then
@@ -161,63 +160,16 @@ codeunit 50104 "BCJ Billing Overview Mgt."
             TempEntryLine."Posting Date" := TimeEntry."Posting Date";
             TempEntryLine."Billing Status" := TimeEntry."Billing Status";
             TempEntryLine.Description := CopyStr(TimeEntry.Comment, 1, MaxStrLen(TempEntryLine.Description));
-            TempEntryLine."Allocated Hours" := TimeEntry."Billable Hours";
-            if TimeEntry."Billing Status" = TimeEntry."Billing Status"::"Sent for Review" then
-                TempEntryLine."Allocated Hours" := GetReviewShare(TimeEntry, ReviewShares, SharedReviewTasks);
-            AddHours(TempEntryLine, TimeEntry."Billing Status", TimeEntry."Time Spent in Hours", TempEntryLine."Allocated Hours");
+            TempEntryLine."Allocated Hours" := TimeEntry."Billable Hours" + TimeEntry."Billed Hours";
+            TempEntryLine."Total Hours" := TimeEntry."Time Spent in Hours";
+            TempEntryLine."Open Hours" := TimeEntry."Open Hours";
+            TempEntryLine."Sent for Review Hours" := TimeEntry."In Review Hours";
+            TempEntryLine."Billable Hours" := TimeEntry."Billable Hours";
+            TempEntryLine."Not Billable Hours" := TimeEntry."Not Billable Hours";
+            TempEntryLine."Billed Hours" := TimeEntry."Billed Hours";
+            TempEntryLine."Unbilled Hours" := TimeEntry."Unbilled Hours";
             TempEntryLine.Insert();
         until TimeEntry.Next() = 0;
-    end;
-
-    /// <summary>
-    /// Returns the part of a Sent for Review entry's hours that its review asks the customer to pay. The review line's
-    /// Hours to Bill is spread over the task's entries in review oldest first, as ApplyAnswer later applies the approval,
-    /// and over all of them regardless of the overview's filters. An entry without a review line keeps all its hours.
-    /// </summary>
-    local procedure GetReviewShare(TimeEntry: Record "BCJ Project Time Entry"; var ReviewShares: Dictionary of [Text, Decimal]; var SharedReviewTasks: Dictionary of [Text, Boolean]): Decimal
-    var
-        ReviewLine: Record "BCJ Customer Review Line";
-        ReviewEntry: Record "BCJ Project Time Entry";
-        ReviewTaskKey: Text;
-        Remaining: Decimal;
-        Share: Decimal;
-    begin
-        ReviewTaskKey := Format(TimeEntry."Review No.") + '|' + TimeEntry."Project Task No.";
-        if not SharedReviewTasks.ContainsKey(ReviewTaskKey) then begin
-            SharedReviewTasks.Add(ReviewTaskKey, true);
-            ReviewLine.SetLoadFields("Hours to Bill");
-            if ReviewLine.Get(TimeEntry."Review No.", TimeEntry."Project Task No.") then begin
-                ReviewEntry.SetCurrentKey("Review No.", "Project Task No.", "Posting Date", "Jira ID");
-                ReviewEntry.SetRange("Review No.", TimeEntry."Review No.");
-                ReviewEntry.SetRange("Project Task No.", TimeEntry."Project Task No.");
-                ReviewEntry.SetRange("Billing Status", ReviewEntry."Billing Status"::"Sent for Review");
-                // Hours to Bill starts at the logged hours rounded to 0.01, so a line nobody lowered must not
-                // leave the rounding difference in Not Billable.
-                ReviewEntry.CalcSums("Time Spent in Hours");
-                Remaining := ReviewLine."Hours to Bill";
-                if Remaining >= Round(ReviewEntry."Time Spent in Hours", 0.01) then
-                    Remaining := ReviewEntry."Time Spent in Hours";
-                ReviewEntry.SetLoadFields("Time Spent in Hours");
-                if ReviewEntry.FindSet() then
-                    repeat
-                        Share := Remaining;
-                        if Share > ReviewEntry."Time Spent in Hours" then
-                            Share := ReviewEntry."Time Spent in Hours";
-                        if Share < 0 then
-                            Share := 0;
-                        Remaining -= Share;
-                        ReviewShares.Set(EntryKey(ReviewEntry), Share);
-                    until ReviewEntry.Next() = 0;
-            end;
-        end;
-        if ReviewShares.Get(EntryKey(TimeEntry), Share) then
-            exit(Share);
-        exit(TimeEntry."Time Spent in Hours");
-    end;
-
-    local procedure EntryKey(TimeEntry: Record "BCJ Project Time Entry"): Text
-    begin
-        exit(TimeEntry."Jira ID" + '|' + TimeEntry."Jira Issue Id");
     end;
 
     local procedure InsertGroupLine(var Buffer: Record "BCJ Billing Overview Buffer" temporary; var NextLineNo: Integer; EntryLine: Record "BCJ Billing Overview Buffer" temporary; LineType: Enum "BCJ Overview Line Type"): Integer
@@ -269,45 +221,15 @@ codeunit 50104 "BCJ Billing Overview Mgt."
 
     local procedure AddHoursToLine(var Buffer: Record "BCJ Billing Overview Buffer" temporary; LineNo: Integer; EntryLine: Record "BCJ Billing Overview Buffer" temporary)
     begin
+        // The time entry's buckets always add up to its logged hours, so the group totals do too.
         Buffer.Get(LineNo);
-        AddHours(Buffer, EntryLine."Billing Status", EntryLine."Total Hours", EntryLine."Allocated Hours");
+        Buffer."Total Hours" += EntryLine."Total Hours";
+        Buffer."Open Hours" += EntryLine."Open Hours";
+        Buffer."Sent for Review Hours" += EntryLine."Sent for Review Hours";
+        Buffer."Billable Hours" += EntryLine."Billable Hours";
+        Buffer."Not Billable Hours" += EntryLine."Not Billable Hours";
+        Buffer."Billed Hours" += EntryLine."Billed Hours";
+        Buffer."Unbilled Hours" += EntryLine."Unbilled Hours";
         Buffer.Modify();
-    end;
-
-    /// <summary>
-    /// Adds one entry's hours to the buckets of Line. LoggedHours is what Jira logged; AllocatedHours is the
-    /// entry's Billable Hours, or for a Sent for Review entry its share of the review's Hours to Bill. For Sent for Review,
-    /// Billable and Billed entries only the allocated part counts in that bucket
-    /// and the rest is Not Billable, so the five buckets always add up to Total Hours.
-    /// </summary>
-    local procedure AddHours(var Line: Record "BCJ Billing Overview Buffer" temporary; Status: Enum "BCJ Billing Status"; LoggedHours: Decimal; AllocatedHours: Decimal)
-    begin
-        if AllocatedHours > LoggedHours then
-            AllocatedHours := LoggedHours;
-        if AllocatedHours < 0 then
-            AllocatedHours := 0;
-        Line."Total Hours" += LoggedHours;
-        case Status of
-            Status::Open:
-                Line."Open Hours" += LoggedHours;
-            Status::"Sent for Review":
-                begin
-                    Line."Sent for Review Hours" += AllocatedHours;
-                    Line."Not Billable Hours" += LoggedHours - AllocatedHours;
-                end;
-            Status::Billable:
-                begin
-                    Line."Billable Hours" += AllocatedHours;
-                    Line."Not Billable Hours" += LoggedHours - AllocatedHours;
-                end;
-            Status::"Not Billable":
-                Line."Not Billable Hours" += LoggedHours;
-            Status::Billed:
-                begin
-                    Line."Billed Hours" += AllocatedHours;
-                    Line."Not Billable Hours" += LoggedHours - AllocatedHours;
-                end;
-        end;
-        Line."Unbilled Hours" := Line."Open Hours" + Line."Sent for Review Hours" + Line."Billable Hours";
     end;
 }

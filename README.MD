@@ -16,56 +16,72 @@ More information about the project [https://www.integrated.ee/posts/business-cen
 
 Time logged in Jira is reviewed and marked for billing in Business Central.
 
-Every Jira time entry has a **Billing Status**:
+The hours of every Jira worklog are split over five buckets, so one worklog can be partly in a review, partly
+approved and partly unbilled (table 50105 *Time Entry Allocation* records which review holds which hours):
 
-| Status | Meaning |
+| Bucket | Meaning |
 |--------|---------|
-| Open | Synced from Jira, not reviewed yet |
-| Billable | Reviewed, to be billed to the customer |
-| Not Billable | Reviewed, will not be billed (internal work, warranty, ...) |
-| Sent for Review | Sent to the customer for approval, waiting for an answer |
-| Billed | Billed to the customer |
+| Open | Unbilled and free: not in a review, not approved, not written off |
+| In Review | Reserved by a draft customer review or waiting for the customer's answer |
+| Billable | Approved (by the customer in a review, or by you) and not invoiced yet |
+| Billed | Invoiced |
+| Not Billable | Written off |
 
-**Jira Billing Overview** (page 50102) shows a Customer → Project → Task → Time Entry tree with total, unbilled, open, billable, not billable and billed hours per level. The customer is the project's *Bill-to Customer No.* — set it on each project card once; projects without one are grouped under *(No customer)*. Filter by date (e.g. `cm` or `lm`), customer, project and status (default: *Unbilled* = Open + Billable), select any rows and use *Mark Selected As* to set the status of every time entry under them, within the current filters.
+*Unbilled* = Open + In Review + Billable. The **Billing Status** of a worklog is derived from its buckets and says
+what it needs next (In Review, else Open, else Billable, else Billed, else Not Billable).
 
-**Jira Time Entry Billing** (page 50103) is a flat, filterable list of the entries with an editable Billing Status and the same mark actions. Views: *Unbilled*, *To Review*, *Ready to Bill*.
+**Jira Billing Overview** (page 50102) shows a Customer → Project → Task → Time Entry tree with the buckets per level.
+The customer is the project's *Bill-to Customer No.* — set it on each project card once; projects without one are
+grouped under *(No customer)*. Filter by date (e.g. `cm` or `lm`), customer, project and view (default: *Unbilled*),
+select any rows and use *Mark Selected As*, within the current filters:
 
-Typical month-end flow: open the overview with date filter `lm` → mark internal work *Not Billable* → mark the rest *Billable* → bill the billable hours per customer in the billing software → mark them *Billed*.
+| Action | Moves |
+|--------|-------|
+| Billable | Open hours → Billable (approve without a customer review) |
+| Not Billable | Open hours → Not Billable (write off) |
+| Billed | Billable hours → Billed, after invoicing. Open hours are never billed. |
+| Open | Billed → Billable; otherwise your own Billable / Not Billable decisions → Open |
 
-The older **Jira Time Entries** page (50100) is unchanged. Its *Is Billable* / *Is Billed* flags are kept in sync with the Billing Status. When the overview opens, entries marked there are picked up: a ticked *Is Billed* always makes the entry Billed; *Is Billable* only promotes entries that are still Open.
+Hours in review are never touched by these actions, and hours a customer approved are taken back only by reopening
+the review.
+
+**Jira Time Entry Billing** (page 50103) is a flat, filterable list of the worklogs with their buckets and the same
+mark actions. Views: *Unbilled*, *In Review*, *To Review*, *Ready to Bill*.
+
+The older **Jira Time Entries** page (50100) keeps its two actions; they now go through the same hour moves
+(*Mark as Billed* approves and bills the Open hours).
 
 ### Customer review
 
 Before billing, the customer can be asked which hours may be invoiced:
 
 1. In the **Jira Billing Overview** select customer, project or task rows and use **Send for Customer Review**.
-   One **Customer Time Review** is created per project from the *Open* entries under the selection (within
-   the current filters), with one line per task and the logged hours. The entries become *Sent for Review*
-   and are skipped by *Mark Selected As* until the review is answered or cancelled. The new review opens
-   (the list, when several were created); nothing is e-mailed yet.
-2. On the review card set **Hours to Bill** per task (0 up to the hours in the review; it starts at all of
-   them), or for every task at once with **Set Hours to Bill %** (e.g. 50). Each line also holds a snapshot
-   of the task's whole history taken at creation: *Logged* (every hour on the task), *Billed* (billed or
-   approved earlier), *Not Billable* (written off earlier) and *Not Billed* (the rest, incl. this review).
-   While the review waits, the Jira Billing Overview shows only the Hours to Bill as *Sent for Review*
-   (spread over the task's entries oldest first, as the answer will be) and the hours left out as
-   *Not Billable*, so *Unbilled* is what the customer is asked to pay.
-3. **Send E-Mail** on the card mails the review (standard Email module, scenario *Jira Customer Time Review*)
-   to the project's **Bill-to Contact** e-mail, falling back to the bill-to customer's e-mail, or share the
-   **Review Link** (`<Customer Review Base URL>/review/<token>`, base URL in **Jira Integration Setup**)
-   yourself. Mail and page show per task the four history figures and the highlighted *To approve* hours.
-   On the Jira Billing Overview, **Customer Review** (or choosing the *Sent for Review Hours* value) opens
-   the review the entries under the current line are waiting on — the list of them when there are several.
+   The Open hours under the selection (within the current filters) are reserved in a **draft** Customer Time
+   Review per project, one line per task; a project that already has a draft gets the hours added to it. Hours
+   in a draft cannot go into another review. Nothing is sent yet and the customer's link does not work yet.
+2. On the draft set **Hours to Bill** per task (0 up to the hours in review; it starts at all of them), or for
+   every task at once with **Set Hours to Bill %** (e.g. 50). Each line also holds a snapshot of the task's
+   whole history: *Logged*, *Billed* (billed or approved), *Not Billable* (written off) and *Not Billed* (the rest).
+3. **Send to Customer** sends the draft: per task the hours left out of Hours to Bill go back to **Open** right
+   away (the oldest hours stay in review), tasks with 0 hours to bill are dropped, and the review is frozen.
+   It is e-mailed (standard Email module, scenario *Jira Customer Time Review*) to the project's **Bill-to
+   Contact** e-mail, falling back to the bill-to customer's e-mail; otherwise share the **Review Link**
+   (`<Customer Review Base URL>/review/<token>`, base URL in **Jira Integration Setup**) yourself.
+   **Resend E-Mail** sends it again. On the overview, **Customer Review** (or choosing the *In Review Hours*
+   value) opens the review holding the hours under the current line.
 4. The customer opens the link (the small web app in `review-web/`), enters the approved hours per task
    (0 up to the Hours to Bill) with an optional comment, and submits.
-5. On submit the answer is applied automatically: the approved hours are allocated to the task's entries
-   oldest first and stored in **Billable Hours**. Entries that receive hours become *Billable*, the rest
-   *Not Billable*. A partly approved entry keeps its logged hours but only the approved part counts as
-   billable in the overview; the remainder shows under *Not Billable*.
+5. On submit the approved hours become **Billable**, oldest first, and every hour the customer did not approve
+   goes back to **Open**. From there you write them off (*Not Billable*) or put them in a next review.
+6. After invoicing, mark the approved hours **Billed** on the overview.
 
-**Customer Time Reviews** (page 50104) lists the reviews with logged, approved and applied hours. A review
-can be **cancelled** while it waits (entries return to *Open*) or **reopened** after an answer so the
-customer can adjust it (entries already *Billed* are left alone).
+**Customer Time Reviews** (page 50104) lists the reviews. A draft or a sent review can be **cancelled** (its hours
+in review return to *Open*), and a draft can be deleted. An answered review can be **reopened** so the customer
+can adjust it: the approved hours go back into review (billed hours stay billed); this is refused when the hours
+have meanwhile been written off or put in another review.
+
+Upgrading to 1.2 moves existing data into the buckets once: hours a customer did not approve in an earlier review
+become Open again, write-offs made by hand stay Not Billable.
 
 `review-web/` is a dependency-free Node app that serves the customer page and talks to BC through the
 `integrated/jira/v1.0` API pages (`customerReviews`, `customerReviewLines`) with a service-to-service

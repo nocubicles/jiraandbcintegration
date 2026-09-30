@@ -44,13 +44,11 @@ table 50100 "BCJ Project Time Entry"
             Editable = false;
 
             trigger OnValidate()
+            var
+                HourAllocationMgt: Codeunit "BCJ Hour Allocation Mgt.";
             begin
-                // Undecided entries stay fully billable; decided ones keep their allocation but never exceed the logged hours.
-                if "Billing Status" in ["Billing Status"::Open, "Billing Status"::"Sent for Review"] then
-                    "Billable Hours" := "Time Spent in Hours"
-                else
-                    if "Billable Hours" > "Time Spent in Hours" then
-                        "Billable Hours" := "Time Spent in Hours";
+                // Jira changed the worklog: fit the hours already allocated to it.
+                HourAllocationMgt.TrimToLoggedHours(Rec);
             end;
         }
         field(9; "Jira Issue Id"; Text[50])
@@ -74,6 +72,8 @@ table 50100 "BCJ Project Time Entry"
         field(13; "Is Billed"; Boolean)
         {
             Caption = 'Is Billed';
+            // Follows the hour buckets; change hours with the billing actions.
+            Editable = false;
         }
         field(14; "Project Description"; Text[100])
         {
@@ -92,6 +92,7 @@ table 50100 "BCJ Project Time Entry"
         field(16; "Is Billable"; Boolean)
         {
             Caption = 'Is Billable';
+            Editable = false;
         }
         field(17; Status; Code[250])
         {
@@ -103,6 +104,8 @@ table 50100 "BCJ Project Time Entry"
         field(18; "Billing Status"; Enum "BCJ Billing Status")
         {
             Caption = 'Billing Status';
+            // Derived from the hour buckets by codeunit "BCJ Hour Allocation Mgt.".
+            Editable = false;
             DataClassification = CustomerContent;
 
             trigger OnValidate()
@@ -121,6 +124,7 @@ table 50100 "BCJ Project Time Entry"
         }
         field(20; "Billable Hours"; Decimal)
         {
+            // Hours approved (by a customer review or by hand) and not invoiced yet.
             Caption = 'Billable Hours';
             DecimalPlaces = 0 : 2;
             MinValue = 0;
@@ -134,6 +138,41 @@ table 50100 "BCJ Project Time Entry"
             DataClassification = CustomerContent;
             TableRelation = "BCJ Customer Review"."Review No.";
             ValidateTableRelation = false;
+        }
+        field(22; "Open Hours"; Decimal)
+        {
+            Caption = 'Open Hours';
+            DecimalPlaces = 0 : 2;
+            Editable = false;
+            DataClassification = CustomerContent;
+        }
+        field(23; "In Review Hours"; Decimal)
+        {
+            Caption = 'In Review Hours';
+            DecimalPlaces = 0 : 2;
+            Editable = false;
+            DataClassification = CustomerContent;
+        }
+        field(24; "Not Billable Hours"; Decimal)
+        {
+            Caption = 'Not Billable Hours';
+            DecimalPlaces = 0 : 2;
+            Editable = false;
+            DataClassification = CustomerContent;
+        }
+        field(25; "Billed Hours"; Decimal)
+        {
+            Caption = 'Billed Hours';
+            DecimalPlaces = 0 : 2;
+            Editable = false;
+            DataClassification = CustomerContent;
+        }
+        field(26; "Unbilled Hours"; Decimal)
+        {
+            Caption = 'Unbilled Hours';
+            DecimalPlaces = 0 : 2;
+            Editable = false;
+            DataClassification = CustomerContent;
         }
     }
     keys
@@ -155,7 +194,20 @@ table 50100 "BCJ Project Time Entry"
 
     trigger OnInsert()
     begin
-        if "Billable Hours" = 0 then
-            "Billable Hours" := "Time Spent in Hours";
+        // A new worklog is all unbilled and free.
+        "In Review Hours" := 0;
+        "Billable Hours" := 0;
+        "Billed Hours" := 0;
+        "Not Billable Hours" := 0;
+        "Open Hours" := "Time Spent in Hours";
+        "Unbilled Hours" := "Time Spent in Hours";
+        Validate("Billing Status", "Billing Status"::Open);
+    end;
+
+    trigger OnDelete()
+    var
+        HourAllocationMgt: Codeunit "BCJ Hour Allocation Mgt.";
+    begin
+        HourAllocationMgt.DeleteEntryRows(Rec);
     end;
 }

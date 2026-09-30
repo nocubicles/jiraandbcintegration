@@ -35,6 +35,8 @@ table 50104 "BCJ Customer Review Line"
 
             trigger OnValidate()
             begin
+                // Only the customer's answer to a sent review sets approved hours.
+                TestReviewStatus("BCJ Review Status"::Sent);
                 if ("Approved Hours" < 0) or ("Approved Hours" > "Hours to Bill") then
                     Error(ApprovedHoursOutOfRangeErr, "Hours to Bill");
             end;
@@ -62,6 +64,8 @@ table 50104 "BCJ Customer Review Line"
 
             trigger OnValidate()
             begin
+                // A sent review is frozen: cancel it and create a new one to ask for different hours.
+                TestReviewStatus("BCJ Review Status"::Draft);
                 if ("Hours to Bill" < 0) or ("Hours to Bill" > "Logged Hours") then
                     Error(HoursToBillOutOfRangeErr, "Logged Hours");
                 // The customer can never have approved more than is asked.
@@ -106,9 +110,19 @@ table 50104 "BCJ Customer Review Line"
     var
         Review: Record "BCJ Customer Review";
     begin
-        // The customer's answer is frozen once applied or cancelled. Internal writes use Modify(false).
+        // Lines change only while the review is a draft (Hours to Bill) or waits for the answer (Approved Hours).
+        // The answer is frozen once applied or cancelled. Internal writes use Modify(false).
         Review.Get("Review No.");
-        Review.TestField(Status, Review.Status::Sent);
+        if not (Review.Status in [Review.Status::Draft, Review.Status::Sent]) then
+            Review.FieldError(Status);
+    end;
+
+    local procedure TestReviewStatus(ExpectedStatus: Enum "BCJ Review Status")
+    var
+        Review: Record "BCJ Customer Review";
+    begin
+        Review.Get("Review No.");
+        Review.TestField(Status, ExpectedStatus);
     end;
 
     var

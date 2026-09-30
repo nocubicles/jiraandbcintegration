@@ -46,7 +46,8 @@ page 50106 "BCJ Customer Review Subform"
                 field("Logged Hours"; Rec."Logged Hours")
                 {
                     Editable = false;
-                    ToolTip = 'Specifies the hours logged on the task that are included in this review.';
+                    Caption = 'Hours in Review';
+                    ToolTip = 'Specifies the hours of the task that this review holds. Hours to Bill can be at most this.';
                 }
                 field("Hours to Bill"; Rec."Hours to Bill")
                 {
@@ -91,7 +92,7 @@ page 50106 "BCJ Customer Review Subform"
         CanEditHoursToBill := false;
         Review.SetLoadFields(Status);
         if Review.Get(Rec."Review No.") then
-            CanEditHoursToBill := Review.Status = Review.Status::Sent;
+            CanEditHoursToBill := Review.Status = Review.Status::Draft;
     end;
 
     var

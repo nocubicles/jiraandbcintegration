@@ -77,6 +77,10 @@ page 50105 "BCJ Customer Review"
                 {
                     ToolTip = 'Specifies the address the review was e-mailed to. Blank if no e-mail was sent.';
                 }
+                field("Sent On"; Rec."Sent On")
+                {
+                    ToolTip = 'Specifies when the review was sent to the customer.';
+                }
                 field("E-Mail Sent On"; Rec."E-Mail Sent On")
                 {
                     ToolTip = 'Specifies when the review was e-mailed. Blank if no e-mail was sent.';
@@ -97,12 +101,32 @@ page 50105 "BCJ Customer Review"
     {
         area(Processing)
         {
+            action(SendToCustomer)
+            {
+                Caption = 'Send to Customer';
+                Image = SendApprovalRequest;
+                Enabled = Rec.Status = Rec.Status::Draft;
+                ToolTip = 'Send the draft review to the customer. The hours you left out of Hours to Bill go back to Open, the review is frozen and e-mailed to the project contact; without an e-mail address, share the review link yourself.';
+
+                trigger OnAction()
+                var
+                    CustomerReviewMgt: Codeunit "BCJ Customer Review Mgt.";
+                begin
+                    if not Confirm(SendQst, false, Rec."Review No.") then
+                        exit;
+                    if CustomerReviewMgt.SendReview(Rec) then
+                        Message(EmailSentMsg, Rec."Sent To E-Mail")
+                    else
+                        Message(SentWithoutEmailMsg);
+                    CurrPage.Update(false);
+                end;
+            }
             action(SendEmail)
             {
-                Caption = 'Send E-Mail';
+                Caption = 'Resend E-Mail';
                 Image = SendMail;
                 Enabled = Rec.Status = Rec.Status::Sent;
-                ToolTip = 'Send or resend the review e-mail to the project contact.';
+                ToolTip = 'Send the review e-mail to the project contact again.';
 
                 trigger OnAction()
                 var
@@ -118,8 +142,8 @@ page 50105 "BCJ Customer Review"
             {
                 Caption = 'Set Hours to Bill %';
                 Image = Percentage;
-                Enabled = Rec.Status = Rec.Status::Sent;
-                ToolTip = 'Set the hours to bill on every task to a percentage of its logged hours, for example 50. You can still change single tasks afterwards.';
+                Enabled = Rec.Status = Rec.Status::Draft;
+                ToolTip = 'Set the hours to bill on every task to a percentage of its hours in review, for example 50. You can still change single tasks afterwards.';
 
                 trigger OnAction()
                 var
@@ -136,8 +160,8 @@ page 50105 "BCJ Customer Review"
             {
                 Caption = 'Cancel Review';
                 Image = Cancel;
-                Enabled = Rec.Status = Rec.Status::Sent;
-                ToolTip = 'Cancel the review and return its time entries to Open.';
+                Enabled = (Rec.Status = Rec.Status::Draft) or (Rec.Status = Rec.Status::Sent);
+                ToolTip = 'Cancel the review and return its hours in review to Open.';
 
                 trigger OnAction()
                 var
@@ -153,7 +177,7 @@ page 50105 "BCJ Customer Review"
                 Caption = 'Reopen';
                 Image = ReOpen;
                 Enabled = Rec.Status = Rec.Status::Answered;
-                ToolTip = 'Reopen an answered review so the customer can adjust the answer. Time entries that are already billed are left unchanged.';
+                ToolTip = 'Reopen an answered review so the customer can adjust the answer. The approved hours go back into review; hours already billed stay billed.';
 
                 trigger OnAction()
                 var
@@ -191,6 +215,9 @@ page 50105 "BCJ Customer Review"
                 actionref(SetHoursToBillPct_Promoted; SetHoursToBillPct)
                 {
                 }
+                actionref(SendToCustomer_Promoted; SendToCustomer)
+                {
+                }
                 actionref(SendEmail_Promoted; SendEmail)
                 {
                 }
@@ -223,6 +250,8 @@ page 50105 "BCJ Customer Review"
         ReviewLink: Text;
         EmailSentMsg: Label 'The review was e-mailed to %1.', Comment = '%1 = e-mail address';
         EmailNotSentMsg: Label 'The review was not sent. The project has no bill-to contact or customer e-mail, or the e-mail could not be sent.';
-        CancelQst: Label 'Cancel customer review %1 and return its time entries to Open?', Comment = '%1 = review no.';
+        CancelQst: Label 'Cancel customer review %1 and return its hours in review to Open?', Comment = '%1 = review no.';
+        SendQst: Label 'Send customer review %1 to the customer? The hours left out of Hours to Bill go back to Open and the review can no longer be changed.', Comment = '%1 = review no.';
+        SentWithoutEmailMsg: Label 'The review was sent but not e-mailed: the project has no bill-to contact or customer e-mail, or the e-mail could not be sent. Share the review link with the customer yourself.';
         ReopenQst: Label 'Reopen customer review %1? The customer can then change the answer.', Comment = '%1 = review no.';
 }

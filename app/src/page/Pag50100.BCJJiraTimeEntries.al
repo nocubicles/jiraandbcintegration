@@ -105,9 +105,10 @@ page 50100 "BCJ Jira Time Entries"
                 trigger OnAction()
                 var
                     JiraEntries: Record "BCJ Project Time Entry";
+                    BillingMgt: Codeunit "BCJ Billing Mgt.";
                 begin
                     CurrPage.SetSelectionFilter(JiraEntries);
-                    JiraEntries.ModifyAll("Is Billable", true);
+                    BillingMgt.SetBillingStatus(JiraEntries, "BCJ Billing Status"::Billable);
                     CurrPage.Update(false);
                 end;
             }
@@ -120,9 +121,12 @@ page 50100 "BCJ Jira Time Entries"
                 trigger OnAction()
                 var
                     JiraEntries: Record "BCJ Project Time Entry";
+                    BillingMgt: Codeunit "BCJ Billing Mgt.";
                 begin
+                    // Billing from this page bills the Open hours too, as it always did.
                     CurrPage.SetSelectionFilter(JiraEntries);
-                    JiraEntries.ModifyAll("Is Billed", true);
+                    BillingMgt.SetBillingStatus(JiraEntries, "BCJ Billing Status"::Billable);
+                    BillingMgt.SetBillingStatus(JiraEntries, "BCJ Billing Status"::Billed);
                     CurrPage.Update(false);
                 end;
             }

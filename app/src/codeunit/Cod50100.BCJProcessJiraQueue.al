@@ -81,8 +81,11 @@ codeunit 50100 "BCJ Process Jira Queue"
                     PostingDateDate:=DT2Date(PostingDateTime);
                     ProjectTimeEntry.Validate("Posting Date", PostingDateDate);
                 end;
-                if Evaluate(TimeSpentSecondsInt, TimeSpentSeconds)then ProjectTimeEntry.Validate("Time Spend Seconds", TimeSpentSecondsInt);
-                ProjectTimeEntry.Validate("Time Spent in Hours", TimeSpentSecondsInt / 3600);
+                // A value Jira did not send must not shrink the worklog to 0 and cut the hours allocated to it.
+                if Evaluate(TimeSpentSecondsInt, TimeSpentSeconds)then begin
+                    ProjectTimeEntry.Validate("Time Spend Seconds", TimeSpentSecondsInt);
+                    ProjectTimeEntry.Validate("Time Spent in Hours", TimeSpentSecondsInt / 3600);
+                end;
                 ProjectTimeEntry.Validate("BC Resource No.", SyncAndGetResourceCode(ResourceName));
                 ProjectTimeEntry.Validate(Comment, CopyStr(Comment, 1, MaxStrLen(ProjectTimeEntry.Comment)));
                 exit(ProjectTimeEntry.Modify(true));
@@ -163,6 +166,7 @@ codeunit 50100 "BCJ Process Jira Queue"
         ProjectTimeEntry: Record "BCJ Project Time Entry";
     begin
         ProjectTimeEntry.SetRange("Jira ID", TimeEntryId);
-        ProjectTimeEntry.DeleteAll();
+        // With the trigger, so the worklog's hour allocation goes with it.
+        ProjectTimeEntry.DeleteAll(true);
     end;
 }

@@ -15,4 +15,8 @@ enum 50102 "BCJ Review Status"
     {
         Caption = 'Cancelled';
     }
+    value(3; Draft)
+    {
+        Caption = 'Draft';
+    }
 }

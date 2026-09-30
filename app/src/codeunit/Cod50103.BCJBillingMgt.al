@@ -1,33 +1,31 @@
 codeunit 50103 "BCJ Billing Mgt."
 {
     /// <summary>
-    /// Sets the billing status on every time entry within the filters of TimeEntry.
-    /// Keeps the legacy "Is Billable"/"Is Billed" flags in sync. Returns the number of entries changed.
+    /// Applies one overview decision to every time entry within the filters of TimeEntry and returns the number of entries
+    /// whose hours moved: Billable / Not Billable take the Open hours, Billed bills the Billable hours, Open undoes the
+    /// consultant's own decisions (Billed goes back to Billable first). Hours in review and hours a customer approved are
+    /// never taken. Sent for Review is refused: hours go into review only through a customer review.
     /// </summary>
     procedure SetBillingStatus(var TimeEntry: Record "BCJ Project Time Entry"; NewStatus: Enum "BCJ Billing Status"): Integer
     var
         EntryToChange: Record "BCJ Project Time Entry";
         EntryToModify: Record "BCJ Project Time Entry";
+        HourAllocationMgt: Codeunit "BCJ Hour Allocation Mgt.";
         ChangedCount: Integer;
     begin
+        HourAllocationMgt.CheckManualDecision(NewStatus);
         EntryToChange.Copy(TimeEntry);
-        // Own filter group, so a caller's filter on Billing Status is kept (filter groups are combined with AND).
-        // Entries waiting for a customer answer are never re-decided here; cancel the review first.
-        EntryToChange.FilterGroup(10);
-        EntryToChange.SetFilter("Billing Status", '<>%1&<>%2', NewStatus, EntryToChange."Billing Status"::"Sent for Review");
-        EntryToChange.FilterGroup(0);
         if EntryToChange.FindSet() then
             repeat
                 EntryToModify := EntryToChange;
-                EntryToModify.Validate("Billing Status", NewStatus);
-                EntryToModify.Modify(true);
-                ChangedCount += 1;
+                if HourAllocationMgt.ApplyManualDecision(EntryToModify, NewStatus) then
+                    ChangedCount += 1;
             until EntryToChange.Next() = 0;
         exit(ChangedCount);
     end;
 
     /// <summary>
-    /// Returns the number of entries within the filters of TimeEntry that are waiting for a customer answer.
+    /// Returns the number of entries within the filters of TimeEntry that have hours in a customer review.
     /// </summary>
     procedure CountEntriesInReview(var TimeEntry: Record "BCJ Project Time Entry"): Integer
     var
@@ -35,7 +33,7 @@ codeunit 50103 "BCJ Billing Mgt."
     begin
         EntryInReview.Copy(TimeEntry);
         EntryInReview.FilterGroup(10);
-        EntryInReview.SetRange("Billing Status", EntryInReview."Billing Status"::"Sent for Review");
+        EntryInReview.SetFilter("In Review Hours", '<>0');
         EntryInReview.FilterGroup(0);
         exit(EntryInReview.Count());
     end;
@@ -53,23 +51,9 @@ codeunit 50103 "BCJ Billing Mgt."
     end;
 
     /// <summary>
-    /// Picks up entries marked on the old Jira Time Entries page, which only sets the legacy flags.
-    /// "Is Billed" always wins (any status becomes Billed) so billed work never shows as unbilled again;
-    /// "Is Billable" only promotes entries that are still Open.
+    /// No longer used: the Jira Time Entries page now changes hours through SetBillingStatus. Kept for compatibility.
     /// </summary>
     procedure SyncStatusFromLegacyFlags()
-    var
-        TimeEntry: Record "BCJ Project Time Entry";
     begin
-        TimeEntry.SetFilter("Billing Status", '<>%1&<>%2', TimeEntry."Billing Status"::Billed, TimeEntry."Billing Status"::"Sent for Review");
-        TimeEntry.SetRange("Is Billed", true);
-        if not TimeEntry.IsEmpty() then
-            TimeEntry.ModifyAll("Billing Status", TimeEntry."Billing Status"::Billed);
-
-        TimeEntry.SetRange("Billing Status", TimeEntry."Billing Status"::Open);
-        TimeEntry.SetRange("Is Billed", false);
-        TimeEntry.SetRange("Is Billable", true);
-        if not TimeEntry.IsEmpty() then
-            TimeEntry.ModifyAll("Billing Status", TimeEntry."Billing Status"::Billable);
     end;
 }

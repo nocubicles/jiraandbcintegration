@@ -55,6 +55,12 @@ table 50103 "BCJ Customer Review"
             Caption = 'Cancelled On';
             Editable = false;
         }
+        field(10; "Sent On"; DateTime)
+        {
+            Caption = 'Sent On';
+            Editable = false;
+            DataClassification = SystemMetadata;
+        }
         field(20; "Logged Hours"; Decimal)
         {
             Caption = 'Logged Hours';
@@ -105,13 +111,17 @@ table 50103 "BCJ Customer Review"
     trigger OnDelete()
     var
         ReviewLine: Record "BCJ Customer Review Line";
+        HourAllocationMgt: Codeunit "BCJ Hour Allocation Mgt.";
     begin
-        if Status <> Status::Cancelled then
+        if not (Status in [Status::Draft, Status::Cancelled]) then
             Error(CannotDeleteReviewErr);
+        // A deleted draft gives its hours back.
+        HourAllocationMgt.ReleaseReview("Review No.");
+        HourAllocationMgt.DeleteEmptyReviewRows("Review No.");
         ReviewLine.SetRange("Review No.", "Review No.");
         ReviewLine.DeleteAll(false);
     end;
 
     var
-        CannotDeleteReviewErr: Label 'Only a cancelled customer review can be deleted. Cancel the review first.';
+        CannotDeleteReviewErr: Label 'Only a draft or cancelled customer review can be deleted. Cancel the review first.';
 }

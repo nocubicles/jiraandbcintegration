@@ -1,14 +1,18 @@
 codeunit 50107 "BCJ Customer Review Mgt."
 {
     var
-        NothingToSendErr: Label 'The selected lines contain no open time entries to send for customer review.';
+        NothingToSendErr: Label 'The selected lines contain no open hours to send for customer review.';
         ApprovedHoursOutOfRangeErr: Label 'The approved hours must be between 0 and %1.', Comment = '%1 = hours to bill on the line';
         PctOutOfRangeErr: Label 'The percentage must be between 0 and 100.';
+        NothingLeftToSendErr: Label 'Every task of this review has 0 hours to bill. Cancel the review instead.';
+        ReopenNotPossibleErr: Label 'Task %1 cannot be reopened: only %2 of its %3 hours to bill are still available. Cancel the draft review holding them or mark the written-off hours Open first.', Comment = '%1 = project task no., %2 = hours available, %3 = hours to bill';
+        CannotCancelErr: Label 'Only a draft review or a review waiting for an answer can be cancelled.';
 
     /// <summary>
-    /// Creates one review per Project No. from the Open time entries within the filters and marks of TimeEntry.
-    /// Entries in any other status are ignored. Fills TempReview with a copy of each created review and returns the number created.
-    /// Errors before writing anything when the review base URL is not configured or when no Open entry is in range.
+    /// Reserves the Open hours of the time entries within the filters and marks of TimeEntry in a Draft review per project,
+    /// one line per task. Hours are added to the project's existing Draft instead of creating a second one. Fills TempReview
+    /// with each review created or extended and returns how many. Errors before writing anything when the review base URL
+    /// is not configured or when no Open hours are selected.
     /// </summary>
     procedure CreateReviews(var TimeEntry: Record "BCJ Project Time Entry"; var TempReview: Record "BCJ Customer Review" temporary): Integer
     var
@@ -18,10 +22,10 @@ codeunit 50107 "BCJ Customer Review Mgt."
     begin
         ReviewMail.CheckSetup();
 
-        // First pass: collect the Open entries without touching the caller's filters or marks.
+        // First pass: collect the entries with Open hours without touching the caller's filters or marks.
         if TimeEntry.FindSet() then
             repeat
-                if TimeEntry."Billing Status" = TimeEntry."Billing Status"::Open then begin
+                if TimeEntry."Open Hours" > 0 then begin
                     TempOpenEntry := TimeEntry;
                     TempOpenEntry.Insert();
                 end;
@@ -29,112 +33,111 @@ codeunit 50107 "BCJ Customer Review Mgt."
         if TempOpenEntry.IsEmpty() then
             Error(NothingToSendErr);
 
-        // Second pass: one review per project, one line per task.
+        // Second pass: one draft per project, one line per task.
         TempOpenEntry.SetCurrentKey("Project No.", "Project Task No.", "Posting Date");
         TempOpenEntry.FindSet();
         repeat
             TempOpenEntry.SetRange("Project No.", TempOpenEntry."Project No.");
-            CreateReviewForProject(TempOpenEntry, TempReview);
-            CreatedCount += 1;
+            if ReserveInDraft(TempOpenEntry, TempReview) then
+                CreatedCount += 1;
             TempOpenEntry.FindLast();
             TempOpenEntry.SetRange("Project No.");
         until TempOpenEntry.Next() = 0;
         exit(CreatedCount);
     end;
 
-    local procedure CreateReviewForProject(var TempOpenEntry: Record "BCJ Project Time Entry" temporary; var TempReview: Record "BCJ Customer Review" temporary)
+    local procedure ReserveInDraft(var TempOpenEntry: Record "BCJ Project Time Entry" temporary; var TempReview: Record "BCJ Customer Review" temporary): Boolean
     var
         Review: Record "BCJ Customer Review";
         ReviewLine: Record "BCJ Customer Review Line";
         TimeEntry: Record "BCJ Project Time Entry";
-        Job: Record Job;
         JobTask: Record "Job Task";
+        HourAllocationMgt: Codeunit "BCJ Hour Allocation Mgt.";
+        Added: Decimal;
+        NewLogged: Decimal;
     begin
-        Review.Init();
-        Review."Project No." := TempOpenEntry."Project No.";
-        Job.SetLoadFields("Bill-to Customer No.");
-        if Job.Get(TempOpenEntry."Project No.") then
-            Review."Customer No." := Job."Bill-to Customer No.";
-        Review.Status := Review.Status::Sent;
-        Review."Access Token" := NewAccessToken();
-        Review.Insert(true);
+        FindOrCreateDraft(TempOpenEntry."Project No.", Review);
 
         TempOpenEntry.FindSet();
         repeat
-            if not ReviewLine.Get(Review."Review No.", TempOpenEntry."Project Task No.") then begin
-                ReviewLine.Init();
-                ReviewLine."Review No." := Review."Review No.";
-                ReviewLine."Project Task No." := TempOpenEntry."Project Task No.";
-                JobTask.SetLoadFields(Description);
-                if JobTask.Get(TempOpenEntry."Project No.", TempOpenEntry."Project Task No.") then
-                    ReviewLine."Task Description" := JobTask.Description;
-                ReviewLine.Insert(true);
-            end;
-            ReviewLine."Logged Hours" += TempOpenEntry."Time Spent in Hours";
-            ReviewLine."Entry Count" += 1;
-            ReviewLine.Modify(false);
-
             TimeEntry.Get(TempOpenEntry."Jira ID", TempOpenEntry."Jira Issue Id");
-            TimeEntry.Validate("Billing Status", TimeEntry."Billing Status"::"Sent for Review");
-            TimeEntry."Review No." := Review."Review No.";
-            TimeEntry.Modify(true);
+            if HourAllocationMgt.ReserveOpenHours(TimeEntry, Review."Review No.") > 0 then begin
+                if not ReviewLine.Get(Review."Review No.", TempOpenEntry."Project Task No.") then begin
+                    ReviewLine.Init();
+                    ReviewLine."Review No." := Review."Review No.";
+                    ReviewLine."Project Task No." := TempOpenEntry."Project Task No.";
+                    JobTask.SetLoadFields(Description);
+                    if JobTask.Get(TempOpenEntry."Project No.", TempOpenEntry."Project Task No.") then
+                        ReviewLine."Task Description" := JobTask.Description;
+                    ReviewLine.Insert(false);
+                end;
+            end;
         until TempOpenEntry.Next() = 0;
 
-        // Jira logs minutes, so summed hours carry many decimals. The customer sees and answers two decimals,
-        // and the approved hours are validated against this value, so round it once here.
+        // Jira logs seconds, so summed hours carry many decimals; the customer sees two. Hours to Bill starts at
+        // everything in review and grows with hours added to the draft; the user lowers it before sending.
         ReviewLine.Reset();
         ReviewLine.SetRange("Review No.", Review."Review No.");
-        // Hours to Bill starts at everything logged; the user lowers it on the review before sending.
         if ReviewLine.FindSet(true) then
             repeat
-                ReviewLine."Logged Hours" := Round(ReviewLine."Logged Hours", 0.01);
-                ReviewLine."Hours to Bill" := ReviewLine."Logged Hours";
+                NewLogged := Round(HourAllocationMgt.InReviewOnTask(Review."Review No.", ReviewLine."Project Task No."), 0.01);
+                ReviewLine."Entry Count" := HourAllocationMgt.CountReviewWorklogs(Review."Review No.", ReviewLine."Project Task No.");
+                Added := NewLogged - ReviewLine."Logged Hours";
+                ReviewLine."Logged Hours" := NewLogged;
+                ReviewLine."Hours to Bill" += Added;
+                if ReviewLine."Hours to Bill" > ReviewLine."Logged Hours" then
+                    ReviewLine."Hours to Bill" := ReviewLine."Logged Hours";
+                if ReviewLine."Hours to Bill" < 0 then
+                    ReviewLine."Hours to Bill" := 0;
                 SetTaskSnapshot(ReviewLine, Review."Project No.");
                 ReviewLine.Modify(false);
             until ReviewLine.Next() = 0;
 
+        if TempReview.Get(Review."Review No.") then
+            exit(false);
         TempReview := Review;
         TempReview.Insert();
+        exit(true);
+    end;
+
+    local procedure FindOrCreateDraft(ProjectNo: Code[20]; var Review: Record "BCJ Customer Review")
+    var
+        Job: Record Job;
+    begin
+        Review.Reset();
+        // Serialise draft creation so two sessions cannot each create a draft for the same project.
+        Review.LockTable();
+        Review.SetCurrentKey("Project No.", Status);
+        Review.SetRange("Project No.", ProjectNo);
+        Review.SetRange(Status, Review.Status::Draft);
+        if Review.FindFirst() then
+            exit;
+        Review.Reset();
+        Review.Init();
+        Review."Project No." := ProjectNo;
+        Job.SetLoadFields("Bill-to Customer No.");
+        if Job.Get(ProjectNo) then
+            Review."Customer No." := Job."Bill-to Customer No.";
+        Review.Status := Review.Status::Draft;
+        Review."Access Token" := NewAccessToken();
+        Review.Insert(true);
     end;
 
     /// <summary>
-    /// Captures the task's whole history on the line, over every time entry of the project task (this review's included):
-    /// billed = allocated hours of Billed and Billable entries, not billable = Not Billable entries plus the unallocated
-    /// part of Billed and Billable ones, not billed = the rest (Open and Sent for Review).
+    /// Captures the task's whole history on the line, over every worklog of the project task (this review included):
+    /// billed = Billed and Billable hours, not billable = written-off hours, not billed = the rest (Open and in review).
     /// </summary>
     local procedure SetTaskSnapshot(var ReviewLine: Record "BCJ Customer Review Line"; ProjectNo: Code[20])
     var
         TimeEntry: Record "BCJ Project Time Entry";
-        Allocated: Decimal;
-        Logged: Decimal;
-        Billed: Decimal;
-        NotBillable: Decimal;
     begin
         TimeEntry.SetRange("Project No.", ProjectNo);
         TimeEntry.SetRange("Project Task No.", ReviewLine."Project Task No.");
-        TimeEntry.SetLoadFields("Time Spent in Hours", "Billable Hours", "Billing Status");
-        if TimeEntry.FindSet() then
-            repeat
-                Logged += TimeEntry."Time Spent in Hours";
-                case TimeEntry."Billing Status" of
-                    TimeEntry."Billing Status"::Billed, TimeEntry."Billing Status"::Billable:
-                        begin
-                            Allocated := TimeEntry."Billable Hours";
-                            if Allocated > TimeEntry."Time Spent in Hours" then
-                                Allocated := TimeEntry."Time Spent in Hours";
-                            if Allocated < 0 then
-                                Allocated := 0;
-                            Billed += Allocated;
-                            NotBillable += TimeEntry."Time Spent in Hours" - Allocated;
-                        end;
-                    TimeEntry."Billing Status"::"Not Billable":
-                        NotBillable += TimeEntry."Time Spent in Hours";
-                end;
-            until TimeEntry.Next() = 0;
+        TimeEntry.CalcSums("Time Spent in Hours", "Billable Hours", "Billed Hours", "Not Billable Hours");
         // Round each figure first and derive Not Billed, so the four always add up exactly.
-        ReviewLine."Task Logged Hours" := Round(Logged, 0.01);
-        ReviewLine."Task Billed Hours" := Round(Billed, 0.01);
-        ReviewLine."Task Not Billable Hours" := Round(NotBillable, 0.01);
+        ReviewLine."Task Logged Hours" := Round(TimeEntry."Time Spent in Hours", 0.01);
+        ReviewLine."Task Billed Hours" := Round(TimeEntry."Billable Hours" + TimeEntry."Billed Hours", 0.01);
+        ReviewLine."Task Not Billable Hours" := Round(TimeEntry."Not Billable Hours", 0.01);
         ReviewLine."Task Not Billed Hours" := ReviewLine."Task Logged Hours" - ReviewLine."Task Billed Hours" - ReviewLine."Task Not Billable Hours";
     end;
 
@@ -151,8 +154,43 @@ codeunit 50107 "BCJ Customer Review Mgt."
     end;
 
     /// <summary>
-    /// Sends the review e-mail for every review in TempReview. Returns the number of e-mails sent.
-    /// Reviews without a recipient are skipped; a failed send never raises an error.
+    /// Sends a Draft review: per task the hours cut from Hours to Bill return to Open (the oldest hours stay in review),
+    /// tasks with nothing to bill are dropped, the review becomes Sent and is e-mailed. Returns whether an e-mail was sent;
+    /// without a recipient the review is still Sent and its link can be shared by hand.
+    /// </summary>
+    procedure SendReview(var Review: Record "BCJ Customer Review"): Boolean
+    var
+        ReviewLine: Record "BCJ Customer Review Line";
+        HourAllocationMgt: Codeunit "BCJ Hour Allocation Mgt.";
+        ReviewMail: Codeunit "BCJ Review Mail";
+    begin
+        Review.TestField(Status, Review.Status::Draft);
+        ReviewLine.SetRange("Review No.", Review."Review No.");
+        if ReviewLine.FindSet(true) then
+            repeat
+                // The Jira sync may have shortened worklogs since the draft was made.
+                ReviewLine."Logged Hours" := Round(HourAllocationMgt.InReviewOnTask(Review."Review No.", ReviewLine."Project Task No."), 0.01);
+                if ReviewLine."Hours to Bill" > ReviewLine."Logged Hours" then
+                    ReviewLine."Hours to Bill" := ReviewLine."Logged Hours";
+                HourAllocationMgt.ReleaseExcess(Review."Review No.", ReviewLine."Project Task No.", ReviewLine."Hours to Bill");
+                if ReviewLine."Hours to Bill" = 0 then
+                    ReviewLine.Delete(false)
+                else begin
+                    SetTaskSnapshot(ReviewLine, Review."Project No.");
+                    ReviewLine.Modify(false);
+                end;
+            until ReviewLine.Next() = 0;
+        if ReviewLine.IsEmpty() then
+            Error(NothingLeftToSendErr);
+        Review.Status := Review.Status::Sent;
+        Review."Sent On" := CurrentDateTime();
+        Review.Modify(true);
+        exit(ReviewMail.SendReviewEmail(Review));
+    end;
+
+    /// <summary>
+    /// Sends every Draft review in TempReview and e-mails the ones already Sent again. Returns the number of e-mails sent.
+    /// Reviews without a recipient are not e-mailed; a failed send never raises an error.
     /// </summary>
     procedure SendReviews(var TempReview: Record "BCJ Customer Review" temporary): Integer
     var
@@ -163,8 +201,14 @@ codeunit 50107 "BCJ Customer Review Mgt."
         if TempReview.FindSet() then
             repeat
                 if Review.Get(TempReview."Review No.") then
-                    if ReviewMail.SendReviewEmail(Review) then
-                        SentCount += 1;
+                    case Review.Status of
+                        Review.Status::Draft:
+                            if SendReview(Review) then
+                                SentCount += 1;
+                        Review.Status::Sent:
+                            if ReviewMail.SendReviewEmail(Review) then
+                                SentCount += 1;
+                    end;
             until TempReview.Next() = 0;
         exit(SentCount);
     end;
@@ -192,91 +236,59 @@ codeunit 50107 "BCJ Customer Review Mgt."
     end;
 
     /// <summary>
-    /// Allocates the approved hours of each line onto that task's entries that are Sent for Review, oldest first.
-    /// Entries that receive hours become Billable, the rest Not Billable. Approved hours that find no entry are dropped
-    /// and the gap is visible as Applied Hours below Approved Hours.
+    /// Applies the approved hours of each line to the task's hours in this review, oldest first: approved hours become
+    /// Billable and every hour not approved returns to Open. Applied Hours shows what could be applied.
     /// </summary>
     procedure ApplyAnswer(var Review: Record "BCJ Customer Review")
     var
         ReviewLine: Record "BCJ Customer Review Line";
-        TimeEntry: Record "BCJ Project Time Entry";
-        Remaining: Decimal;
-        Give: Decimal;
+        HourAllocationMgt: Codeunit "BCJ Hour Allocation Mgt.";
     begin
         Review.TestField(Status, Review.Status::Answered);
         ReviewLine.SetRange("Review No.", Review."Review No.");
-        if not ReviewLine.FindSet() then
-            exit;
-        repeat
-            Remaining := ReviewLine."Approved Hours";
-            TimeEntry.Reset();
-            TimeEntry.SetCurrentKey("Review No.", "Project Task No.", "Posting Date", "Jira ID");
-            TimeEntry.SetRange("Review No.", Review."Review No.");
-            TimeEntry.SetRange("Project Task No.", ReviewLine."Project Task No.");
-            TimeEntry.SetRange("Billing Status", TimeEntry."Billing Status"::"Sent for Review");
-            if TimeEntry.FindSet(true) then
-                repeat
-                    Give := Remaining;
-                    if Give > TimeEntry."Time Spent in Hours" then
-                        Give := TimeEntry."Time Spent in Hours";
-                    if Give < 0 then
-                        Give := 0;
-                    Remaining -= Give;
-                    TimeEntry."Billable Hours" := Give;
-                    if Give > 0 then
-                        TimeEntry.Validate("Billing Status", TimeEntry."Billing Status"::Billable)
-                    else
-                        TimeEntry.Validate("Billing Status", TimeEntry."Billing Status"::"Not Billable");
-                    TimeEntry.Modify(true);
-                until TimeEntry.Next() = 0;
-            ReviewLine."Applied Hours" := ReviewLine."Approved Hours" - Remaining;
-            ReviewLine.Modify(false);
-        until ReviewLine.Next() = 0;
+        if ReviewLine.FindSet() then
+            repeat
+                ReviewLine."Applied Hours" := HourAllocationMgt.ApproveReviewHours(Review."Review No.", ReviewLine."Project Task No.", ReviewLine."Approved Hours");
+                ReviewLine.Modify(false);
+            until ReviewLine.Next() = 0;
+        // Hours still in review on a task without a line cannot be approved: return them to Open too.
+        HourAllocationMgt.ReleaseReview(Review."Review No.");
     end;
 
     /// <summary>
-    /// Cancels a review that is still waiting for an answer. Its entries that are still Sent for Review go back to Open.
+    /// Cancels a Draft review or one waiting for an answer. Its hours in review return to Open.
     /// </summary>
     procedure CancelReview(var Review: Record "BCJ Customer Review")
     var
-        TimeEntry: Record "BCJ Project Time Entry";
+        HourAllocationMgt: Codeunit "BCJ Hour Allocation Mgt.";
     begin
-        Review.TestField(Status, Review.Status::Sent);
-        TimeEntry.SetRange("Review No.", Review."Review No.");
-        TimeEntry.SetRange("Billing Status", TimeEntry."Billing Status"::"Sent for Review");
-        if TimeEntry.FindSet(true) then
-            repeat
-                TimeEntry.Validate("Billing Status", TimeEntry."Billing Status"::Open);
-                TimeEntry."Billable Hours" := TimeEntry."Time Spent in Hours";
-                TimeEntry."Review No." := 0;
-                TimeEntry.Modify(true);
-            until TimeEntry.Next() = 0;
+        if not (Review.Status in [Review.Status::Draft, Review.Status::Sent]) then
+            Error(CannotCancelErr);
+        HourAllocationMgt.ReleaseReview(Review."Review No.");
         Review.Status := Review.Status::Cancelled;
         Review."Cancelled On" := CurrentDateTime();
         Review.Modify(true);
     end;
 
     /// <summary>
-    /// Reopens an answered review so the customer can adjust the answer. Undoes the allocation on entries that are
-    /// Billable or Not Billable (entries already Billed are left alone) and keeps the approved hours and comments.
+    /// Reopens an answered review so the customer can adjust the answer: its approved hours go back into review and are
+    /// topped up from its worklogs' Open hours to each task's Hours to Bill. Billed hours stay billed. Errors, changing
+    /// nothing, when a task cannot get its hours back. Approved hours and comments are kept.
     /// </summary>
     procedure ReopenReview(var Review: Record "BCJ Customer Review")
     var
         ReviewLine: Record "BCJ Customer Review Line";
-        TimeEntry: Record "BCJ Project Time Entry";
+        HourAllocationMgt: Codeunit "BCJ Hour Allocation Mgt.";
+        Reached: Decimal;
     begin
         Review.TestField(Status, Review.Status::Answered);
-        TimeEntry.SetRange("Review No.", Review."Review No.");
-        TimeEntry.SetFilter("Billing Status", '%1|%2', TimeEntry."Billing Status"::Billable, TimeEntry."Billing Status"::"Not Billable");
-        if TimeEntry.FindSet(true) then
-            repeat
-                TimeEntry.Validate("Billing Status", TimeEntry."Billing Status"::"Sent for Review");
-                TimeEntry."Billable Hours" := TimeEntry."Time Spent in Hours";
-                TimeEntry.Modify(true);
-            until TimeEntry.Next() = 0;
         ReviewLine.SetRange("Review No.", Review."Review No.");
         if ReviewLine.FindSet(true) then
             repeat
+                Reached := HourAllocationMgt.ReReserveReview(Review."Review No.", ReviewLine."Project Task No.", ReviewLine."Hours to Bill");
+                // Hours to Bill is rounded to 0.01, so allow for the rounding.
+                if Reached < ReviewLine."Hours to Bill" - 0.005 then
+                    Error(ReopenNotPossibleErr, ReviewLine."Project Task No.", Round(Reached, 0.01), ReviewLine."Hours to Bill");
                 ReviewLine."Applied Hours" := 0;
                 ReviewLine.Modify(false);
             until ReviewLine.Next() = 0;
@@ -298,14 +310,14 @@ codeunit 50107 "BCJ Customer Review Mgt."
     end;
 
     /// <summary>
-    /// Fills TempReview with the reviews still waiting for an answer (Status Sent) that the time entries within the
-    /// filters of TimeEntry belong to, each once, and returns how many there are. TempReview is emptied first.
-    /// Entries without a review and reviews that are answered or cancelled are ignored.
+    /// Fills TempReview with the Draft and Sent reviews that hold hours of the time entries within the filters of
+    /// TimeEntry, each once, and returns how many there are. TempReview is emptied first.
     /// Only filters are honoured, not marks: pass a filtered record, not a MarkedOnly selection.
     /// </summary>
     procedure GetOpenReviews(var TimeEntry: Record "BCJ Project Time Entry"; var TempReview: Record "BCJ Customer Review" temporary): Integer
     var
         EntryInFilter: Record "BCJ Project Time Entry";
+        Allocation: Record "BCJ Time Entry Allocation";
         Review: Record "BCJ Customer Review";
         TempSeenReview: Record "BCJ Customer Review" temporary;
     begin
@@ -313,33 +325,39 @@ codeunit 50107 "BCJ Customer Review Mgt."
         TempReview.DeleteAll(false);
         // Work on a copy so the caller's record keeps its position; the caller's filters still apply.
         EntryInFilter.CopyFilters(TimeEntry);
-        EntryInFilter.SetFilter("Review No.", '<>0');
-        EntryInFilter.SetLoadFields("Review No.");
+        EntryInFilter.SetFilter("In Review Hours", '<>0');
+        EntryInFilter.SetLoadFields("Jira ID", "Jira Issue Id");
         if EntryInFilter.FindSet() then
             repeat
-                // Each review is read once, whether it turns out open or not.
-                if not TempSeenReview.Get(EntryInFilter."Review No.") then begin
-                    TempSeenReview."Review No." := EntryInFilter."Review No.";
-                    TempSeenReview.Insert(false);
-                    if Review.Get(EntryInFilter."Review No.") then
-                        if Review.Status = Review.Status::Sent then begin
-                            TempReview := Review;
-                            TempReview.Insert(false);
+                Allocation.SetRange("Jira ID", EntryInFilter."Jira ID");
+                Allocation.SetRange("Jira Issue Id", EntryInFilter."Jira Issue Id");
+                Allocation.SetFilter("In Review Hours", '<>0');
+                if Allocation.FindSet() then
+                    repeat
+                        // Each review is read once, whether it turns out open or not.
+                        if not TempSeenReview.Get(Allocation."Review No.") then begin
+                            TempSeenReview."Review No." := Allocation."Review No.";
+                            TempSeenReview.Insert(false);
+                            if Review.Get(Allocation."Review No.") then
+                                if Review.Status in [Review.Status::Draft, Review.Status::Sent] then begin
+                                    TempReview := Review;
+                                    TempReview.Insert(false);
+                                end;
                         end;
-                end;
+                    until Allocation.Next() = 0;
             until EntryInFilter.Next() = 0;
         exit(TempReview.Count());
     end;
 
     /// <summary>
-    /// Sets Hours to Bill on every line of a review that is still Sent to Pct percent of the line's Logged Hours,
-    /// rounded to 0.01. Pct must be between 0 and 100.
+    /// Sets Hours to Bill on every line of a Draft review to Pct percent of the line's hours in review, rounded to 0.01.
+    /// Pct must be between 0 and 100.
     /// </summary>
     procedure SetHoursToBillPct(var Review: Record "BCJ Customer Review"; Pct: Decimal)
     var
         ReviewLine: Record "BCJ Customer Review Line";
     begin
-        Review.TestField(Status, Review.Status::Sent);
+        Review.TestField(Status, Review.Status::Draft);
         if (Pct < 0) or (Pct > 100) then
             Error(PctOutOfRangeErr);
         ReviewLine.SetRange("Review No.", Review."Review No.");
