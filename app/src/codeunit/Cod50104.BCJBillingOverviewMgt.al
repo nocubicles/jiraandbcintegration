@@ -4,9 +4,30 @@ codeunit 50104 "BCJ Billing Overview Mgt."
         NoCustomerTxt: Label '(No customer)';
 
     /// <summary>
+    /// Rebuilds Buffer as a Customer > Project > Task tree of every time entry within the filters of TimeEntryFilter, with
+    /// their hours, and lists as Time Entry lines only the entries that are also within the filters of ViewFilter.
+    /// </summary>
+    procedure BuildOverview(var Buffer: Record "BCJ Billing Overview Buffer" temporary; var TimeEntryFilter: Record "BCJ Project Time Entry"; var ViewFilter: Record "BCJ Project Time Entry"; IncludeTimeEntries: Boolean)
+    var
+        EntriesInView: Dictionary of [Text, Text];
+    begin
+        // The tree always shows every customer, project and task; the view only decides which worklogs are listed.
+        if IncludeTimeEntries then
+            CollectEntriesInView(TimeEntryFilter, ViewFilter, EntriesInView);
+        Build(Buffer, TimeEntryFilter, IncludeTimeEntries, ViewFilter.GetFilters() = '', EntriesInView);
+    end;
+
+    /// <summary>
     /// Rebuilds Buffer as a Customer > Project > Task (> Time Entry) tree of the time entries within the filters of TimeEntryFilter.
     /// </summary>
     procedure BuildOverview(var Buffer: Record "BCJ Billing Overview Buffer" temporary; var TimeEntryFilter: Record "BCJ Project Time Entry"; IncludeTimeEntries: Boolean)
+    var
+        EntriesInView: Dictionary of [Text, Text];
+    begin
+        Build(Buffer, TimeEntryFilter, IncludeTimeEntries, true, EntriesInView);
+    end;
+
+    local procedure Build(var Buffer: Record "BCJ Billing Overview Buffer" temporary; var TimeEntryFilter: Record "BCJ Project Time Entry"; IncludeTimeEntries: Boolean; AllInView: Boolean; var EntriesInView: Dictionary of [Text, Text])
     var
         TempEntryLine: Record "BCJ Billing Overview Buffer" temporary;
         CurrCustomerNo: Code[20];
@@ -22,7 +43,8 @@ codeunit 50104 "BCJ Billing Overview Mgt."
         Buffer.Reset();
         Buffer.DeleteAll();
 
-        CollectTimeEntries(TempEntryLine, TimeEntryFilter, IncludeTimeEntries);
+        // With a view, the worklog comments come with the listed entries only (CollectEntriesInView).
+        CollectTimeEntries(TempEntryLine, TimeEntryFilter, IncludeTimeEntries and AllInView);
 
         TempEntryLine.SetCurrentKey("Customer No.", "Project No.", "Project Task No.", "Posting Date", "Jira ID");
         if TempEntryLine.FindSet() then begin
@@ -45,9 +67,11 @@ codeunit 50104 "BCJ Billing Overview Mgt."
                 AddHoursToLine(Buffer, ProjectLineNo, TempEntryLine);
                 AddHoursToLine(Buffer, TaskLineNo, TempEntryLine);
 
-                if IncludeTimeEntries then begin
+                if IncludeTimeEntries and (AllInView or EntriesInView.ContainsKey(EntryKey(TempEntryLine."Jira ID", TempEntryLine."Jira Issue Id"))) then begin
                     NextLineNo += 1;
                     Buffer := TempEntryLine;
+                    if not AllInView then
+                        Buffer.Description := CopyStr(EntriesInView.Get(EntryKey(TempEntryLine."Jira ID", TempEntryLine."Jira Issue Id")), 1, MaxStrLen(Buffer.Description));
                     Buffer."Entry No." := NextLineNo;
                     Buffer.Insert();
                 end;
@@ -55,6 +79,41 @@ codeunit 50104 "BCJ Billing Overview Mgt."
         end;
 
         if Buffer.FindFirst() then;
+    end;
+
+    /// <summary>
+    /// Collects the keys and worklog comments of the time entries within the filters of both TimeEntryFilter and ViewFilter, in one query:
+    /// the view's filters are added in their own filter group, so neither filter set overrides the other.
+    /// </summary>
+    local procedure CollectEntriesInView(var TimeEntryFilter: Record "BCJ Project Time Entry"; var ViewFilter: Record "BCJ Project Time Entry"; var EntriesInView: Dictionary of [Text, Text])
+    var
+        TimeEntry: Record "BCJ Project Time Entry";
+        ViewRef: RecordRef;
+        EntryRef: RecordRef;
+        ViewField: FieldRef;
+        i: Integer;
+    begin
+        TimeEntry.CopyFilters(TimeEntryFilter);
+        EntryRef.GetTable(TimeEntry);
+        EntryRef.FilterGroup(10);
+        ViewRef.GetTable(ViewFilter);
+        for i := 1 to ViewRef.FieldCount() do begin
+            ViewField := ViewRef.FieldIndex(i);
+            if ViewField.GetFilter() <> '' then
+                EntryRef.Field(ViewField.Number()).SetFilter(ViewField.GetFilter());
+        end;
+        EntryRef.FilterGroup(0);
+        EntryRef.SetTable(TimeEntry);
+        TimeEntry.SetLoadFields("Jira ID", "Jira Issue Id", Comment);
+        if TimeEntry.FindSet() then
+            repeat
+                EntriesInView.Set(EntryKey(TimeEntry."Jira ID", TimeEntry."Jira Issue Id"), TimeEntry.Comment);
+            until TimeEntry.Next() = 0;
+    end;
+
+    local procedure EntryKey(JiraId: Text; JiraIssueId: Text): Text
+    begin
+        exit(JiraId + '|' + JiraIssueId);
     end;
 
     /// <summary>
@@ -124,7 +183,7 @@ codeunit 50104 "BCJ Billing Overview Mgt."
         exit(BillingMgt.SetBillingStatus(TimeEntry, NewStatus));
     end;
 
-    local procedure CollectTimeEntries(var TempEntryLine: Record "BCJ Billing Overview Buffer" temporary; var TimeEntryFilter: Record "BCJ Project Time Entry"; IncludeTimeEntries: Boolean)
+    local procedure CollectTimeEntries(var TempEntryLine: Record "BCJ Billing Overview Buffer" temporary; var TimeEntryFilter: Record "BCJ Project Time Entry"; LoadComments: Boolean)
     var
         TimeEntry: Record "BCJ Project Time Entry";
         Job: Record Job;
@@ -134,7 +193,7 @@ codeunit 50104 "BCJ Billing Overview Mgt."
         TimeEntry.CopyFilters(TimeEntryFilter);
         TimeEntry.SetLoadFields("Project No.", "Project Task No.", "BC Resource No.", "Posting Date", "Time Spent in Hours", "Billing Status",
             "Open Hours", "In Review Hours", "Billable Hours", "Billed Hours", "Not Billable Hours", "Unbilled Hours");
-        if IncludeTimeEntries then
+        if LoadComments then
             TimeEntry.AddLoadFields(Comment);
         if not TimeEntry.FindSet() then
             exit;
@@ -159,7 +218,9 @@ codeunit 50104 "BCJ Billing Overview Mgt."
             TempEntryLine."Resource No." := TimeEntry."BC Resource No.";
             TempEntryLine."Posting Date" := TimeEntry."Posting Date";
             TempEntryLine."Billing Status" := TimeEntry."Billing Status";
-            TempEntryLine.Description := CopyStr(TimeEntry.Comment, 1, MaxStrLen(TempEntryLine.Description));
+            // Reading Comment when it was not loaded would fetch every record again.
+            if LoadComments then
+                TempEntryLine.Description := CopyStr(TimeEntry.Comment, 1, MaxStrLen(TempEntryLine.Description));
             TempEntryLine."Allocated Hours" := TimeEntry."Billable Hours" + TimeEntry."Billed Hours";
             TempEntryLine."Total Hours" := TimeEntry."Time Spent in Hours";
             TempEntryLine."Open Hours" := TimeEntry."Open Hours";

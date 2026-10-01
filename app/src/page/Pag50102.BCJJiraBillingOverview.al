@@ -79,7 +79,7 @@ page 50102 "BCJ Jira Billing Overview"
                 {
                     Caption = 'Show';
                     OptionCaption = 'Unbilled,Open,Sent for Review,Billable,Not Billable,Billed,All';
-                    ToolTip = 'Specifies which time entries to include. Unbilled shows entries that are Open, Sent for Review or Billable, i.e. everything that is not billed yet and not excluded from billing.';
+                    ToolTip = 'Specifies which time entries to list and to change with the mark actions. Every customer, project and task within the date, customer and project filters is always shown with all its hours. Unbilled lists entries with open, in-review or billable hours.';
 
                     trigger OnValidate()
                     begin
@@ -209,7 +209,7 @@ page 50102 "BCJ Jira Billing Overview"
                 {
                     Caption = 'Billable';
                     Image = Approve;
-                    ToolTip = 'Approve the open (unbilled) hours under the selected lines without a customer review. Hours in review are not changed. Only entries within the current filters are changed.';
+                    ToolTip = 'Approve the open (unbilled) hours under the selected lines without a customer review. Hours in review are not changed. Works on all hours under the selected lines within the date, customer and project filters, whatever Show is set to.';
 
                     trigger OnAction()
                     begin
@@ -220,7 +220,7 @@ page 50102 "BCJ Jira Billing Overview"
                 {
                     Caption = 'Not Billable';
                     Image = Reject;
-                    ToolTip = 'Write off the open (unbilled) hours under the selected lines. Hours in review and hours approved by the customer are not changed. Only entries within the current filters are changed.';
+                    ToolTip = 'Write off the open (unbilled) hours under the selected lines. Hours in review and hours approved by the customer are not changed. Works on all hours under the selected lines within the date, customer and project filters, whatever Show is set to.';
 
                     trigger OnAction()
                     begin
@@ -231,7 +231,7 @@ page 50102 "BCJ Jira Billing Overview"
                 {
                     Caption = 'Billed';
                     Image = Invoice;
-                    ToolTip = 'Mark the approved (billable) hours under the selected lines as billed after invoicing them. Open hours and hours in review are not billed. Only entries within the current filters are changed.';
+                    ToolTip = 'Mark the approved (billable) hours under the selected lines as billed after invoicing them. Open hours and hours in review are not billed. Works on all hours under the selected lines within the date, customer and project filters, whatever Show is set to.';
 
                     trigger OnAction()
                     begin
@@ -242,7 +242,7 @@ page 50102 "BCJ Jira Billing Overview"
                 {
                     Caption = 'Open';
                     Image = ReOpen;
-                    ToolTip = 'Undo your own decisions under the selected lines: billed hours go back to billable, otherwise hours you marked billable or not billable go back to open. Hours approved in a customer review are taken back only by reopening the review. Only entries within the current filters are changed.';
+                    ToolTip = 'Undo your own decisions under the selected lines: billed hours go back to billable, otherwise hours you marked billable or not billable go back to open. Hours approved in a customer review are taken back only by reopening the review. Works on all hours under the selected lines within the date, customer and project filters, whatever Show is set to.';
 
                     trigger OnAction()
                     begin
@@ -254,7 +254,7 @@ page 50102 "BCJ Jira Billing Overview"
             {
                 Caption = 'Send for Customer Review';
                 Image = SendApprovalRequest;
-                ToolTip = 'Reserve the open hours under the selected lines in a draft customer review per project and open it, so you can set the hours to bill before sending it. A project that already has a draft gets the hours added to it. Only entries within the current filters are included.';
+                ToolTip = 'Reserve the open hours under the selected lines in a draft customer review per project and open it, so you can set the hours to bill before sending it. A project that already has a draft gets the hours added to it. Takes the open hours under the selected lines within the date, customer and project filters, whatever Show is set to.';
 
                 trigger OnAction()
                 begin
@@ -415,12 +415,16 @@ page 50102 "BCJ Jira Billing Overview"
     local procedure RefreshOverview()
     var
         TimeEntry: Record "BCJ Project Time Entry";
+        ViewEntry: Record "BCJ Project Time Entry";
         CurrentLine: Record "BCJ Billing Overview Buffer" temporary;
     begin
         // Entry numbers are reassigned on rebuild, so find the current line again by its keys.
         CurrentLine := Rec;
-        SetTimeEntryFilters(TimeEntry);
-        BillingOverviewMgt.BuildOverview(Rec, TimeEntry, ShowTimeEntries);
+        // Every customer, project and task in the date, customer and project filters stays in the tree;
+        // the Show view only decides which time entries are listed.
+        SetBaseFilters(TimeEntry);
+        SetViewFilter(ViewEntry);
+        BillingOverviewMgt.BuildOverview(Rec, TimeEntry, ViewEntry, ShowTimeEntries);
         Rec.SetRange("Line Type", CurrentLine."Line Type");
         Rec.SetRange("Customer No.", CurrentLine."Customer No.");
         Rec.SetRange("Project No.", CurrentLine."Project No.");
@@ -435,7 +439,16 @@ page 50102 "BCJ Jira Billing Overview"
         CurrPage.Update(false);
     end;
 
+    /// <summary>
+    /// The time entries listed on the page: the date, customer and project filters plus the Show view.
+    /// </summary>
     local procedure SetTimeEntryFilters(var TimeEntry: Record "BCJ Project Time Entry")
+    begin
+        SetBaseFilters(TimeEntry);
+        SetViewFilter(TimeEntry);
+    end;
+
+    local procedure SetBaseFilters(var TimeEntry: Record "BCJ Project Time Entry")
     begin
         TimeEntry.Reset();
         if DateFilter <> '' then
@@ -444,6 +457,10 @@ page 50102 "BCJ Jira Billing Overview"
             TimeEntry.SetFilter("Bill-to Customer No.", CustomerFilter);
         if ProjectFilter <> '' then
             TimeEntry.SetFilter("Project No.", ProjectFilter);
+    end;
+
+    local procedure SetViewFilter(var TimeEntry: Record "BCJ Project Time Entry")
+    begin
         case StatusView of
             // A worklog can be split over several buckets, so a view shows every worklog holding hours in it.
             StatusView::Unbilled:
@@ -477,7 +494,7 @@ page 50102 "BCJ Jira Billing Overview"
         if NewStatus = "BCJ Billing Status"::Open then begin
             if SelectedLine.FindSet() then
                 repeat
-                    SetTimeEntryFilters(TimeEntry);
+                    SetBaseFilters(TimeEntry);
                     BillingOverviewMgt.ApplyLineFilter(SelectedLine, TimeEntry);
                     TimeEntry.SetFilter("Billed Hours", '<>0');
                     BilledCount += TimeEntry.Count();
@@ -488,12 +505,12 @@ page 50102 "BCJ Jira Billing Overview"
         end;
         if SelectedLine.FindSet() then
             repeat
-                SetTimeEntryFilters(TimeEntry);
+                SetBaseFilters(TimeEntry);
                 ChangedCount += BillingOverviewMgt.SetStatusForLine(SelectedLine, TimeEntry, NewStatus);
             until SelectedLine.Next() = 0;
         // Count the skipped entries. A single selected row needs one Count; several rows may overlap
         // (a customer row plus one of its tasks), so those are de-duplicated through marks.
-        SetTimeEntryFilters(TimeEntry);
+        SetBaseFilters(TimeEntry);
         if SelectedLine.Count() = 1 then begin
             SelectedLine.FindFirst();
             BillingOverviewMgt.ApplyLineFilter(SelectedLine, TimeEntry);
@@ -520,7 +537,7 @@ page 50102 "BCJ Jira Billing Overview"
     begin
         SelectedLine.Copy(Rec, true);
         CurrPage.SetSelectionFilter(SelectedLine);
-        SetTimeEntryFilters(TimeEntryFilter);
+        SetBaseFilters(TimeEntryFilter);
         BillingOverviewMgt.MarkEntriesForLines(SelectedLine, TimeEntryFilter, MarkedEntry);
         CustomerReviewMgt.CreateReviews(MarkedEntry, TempReview);
         // Nothing is e-mailed here: the user sets the hours to bill on the review, then sends it from the card.
@@ -537,12 +554,7 @@ page 50102 "BCJ Jira Billing Overview"
         CustomerReviewMgt: Codeunit "BCJ Customer Review Mgt.";
     begin
         // Whichever status view is shown, look at the worklogs with hours in review under the line.
-        SetTimeEntryFilters(TimeEntry);
-        TimeEntry.SetRange("Unbilled Hours");
-        TimeEntry.SetRange("Open Hours");
-        TimeEntry.SetRange("Billable Hours");
-        TimeEntry.SetRange("Not Billable Hours");
-        TimeEntry.SetRange("Billed Hours");
+        SetBaseFilters(TimeEntry);
         BillingOverviewMgt.ApplyLineFilter(Rec, TimeEntry);
         TimeEntry.SetFilter("In Review Hours", '<>0');
         if CustomerReviewMgt.GetOpenReviews(TimeEntry, TempReview) = 0 then begin
